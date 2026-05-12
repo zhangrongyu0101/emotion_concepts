@@ -49,6 +49,9 @@ emotion_vectors:
   aggregation: "mean"
   # Where to save extracted vectors
   output_dir: "results/emotion_vectors"
+  # Where to save generated stories as JSONL (null = do not save)
+  # Each emotion gets its own file: results/stories/happy.jsonl, etc.
+  stories_dir: "results/stories"
 
 generation:
   max_new_tokens: 300

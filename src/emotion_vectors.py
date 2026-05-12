@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -65,20 +66,48 @@ class EmotionVectorExtractor:
         target_layers: Optional[list[int]] = None,
         story_prompt_template: str = STORY_PROMPT,
         neutral_prompt_template: str = NEUTRAL_PROMPT,
+        stories_dir: Optional[str] = None,
     ):
+        """
+        Args:
+            stories_dir: If set, generated stories are saved as JSONL files under
+                         this directory (one file per emotion + one for neutral).
+                         Existing files are appended to, enabling resume.
+        """
         self.backend = backend
         self.n_stories = n_stories
         self.n_neutral = n_neutral
         self.aggregation = aggregation
         self.story_prompt = story_prompt_template
         self.neutral_prompt = neutral_prompt_template
+        self.stories_dir = Path(stories_dir) if stories_dir else None
+        if self.stories_dir:
+            self.stories_dir.mkdir(parents=True, exist_ok=True)
 
         num_layers = backend.num_layers
         self.target_layers = target_layers if target_layers else list(range(num_layers))
 
-    def _generate_and_extract(self, prompt: str) -> dict[int, torch.Tensor]:
-        """Generate a story for the prompt and extract activations from the full context."""
+    def _save_story(self, record: dict) -> None:
+        """Append one story record to its JSONL file (one line per story)."""
+        if self.stories_dir is None:
+            return
+        label = record["emotion"] if record["emotion"] else "neutral"
+        path = self.stories_dir / f"{label.replace(' ', '_')}.jsonl"
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    def _generate_and_extract(
+        self, prompt: str, emotion: Optional[str], index: int
+    ) -> dict[int, torch.Tensor]:
+        """Generate a story, optionally save it, then extract activations."""
         story = self.backend.generate(prompt, max_new_tokens=300, temperature=0.8)
+        self._save_story({
+            "emotion": emotion,
+            "index": index,
+            "prompt": prompt,
+            "story": story,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
         full_text = prompt + story
         return self.backend.get_activations(
             full_text, layers=self.target_layers, aggregation=self.aggregation
@@ -88,8 +117,8 @@ class EmotionVectorExtractor:
         print(f"Collecting {self.n_neutral} neutral baseline activations...")
         neutral_acts: dict[int, list[torch.Tensor]] = {l: [] for l in self.target_layers}
 
-        for _ in tqdm(range(self.n_neutral), desc="Neutral stories"):
-            acts = self._generate_and_extract(self.neutral_prompt)
+        for i in tqdm(range(self.n_neutral), desc="Neutral stories"):
+            acts = self._generate_and_extract(self.neutral_prompt, emotion=None, index=i)
             for layer, act in acts.items():
                 neutral_acts[layer].append(act)
 
@@ -106,8 +135,8 @@ class EmotionVectorExtractor:
         emotion_acts: dict[int, list[torch.Tensor]] = {l: [] for l in self.target_layers}
         prompt = self.story_prompt.format(emotion=emotion)
 
-        for _ in range(self.n_stories):
-            acts = self._generate_and_extract(prompt)
+        for i in range(self.n_stories):
+            acts = self._generate_and_extract(prompt, emotion=emotion, index=i)
             for layer, act in acts.items():
                 emotion_acts[layer].append(act)
 
@@ -173,6 +202,7 @@ class EmotionVectorExtractor:
             "n_neutral": self.n_neutral,
             "aggregation": self.aggregation,
             "hidden_size": self.backend.hidden_size,
+            "stories_dir": str(self.stories_dir) if self.stories_dir else None,
         }
         with open(output_path / "metadata.json", "w") as f:
             json.dump(meta, f, indent=2)

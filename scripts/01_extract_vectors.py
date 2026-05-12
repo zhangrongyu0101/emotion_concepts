@@ -6,6 +6,10 @@ Usage:
     python scripts/01_extract_vectors.py
     python scripts/01_extract_vectors.py --model Qwen/Qwen2.5-7B-Instruct --device cuda
     python scripts/01_extract_vectors.py --n-stories 5 --emotions happy sad angry
+
+    # Save generated stories to disk (default: on, from config)
+    python scripts/01_extract_vectors.py --stories-dir results/stories
+    python scripts/01_extract_vectors.py --no-save-stories
 """
 
 import argparse
@@ -32,6 +36,15 @@ def parse_args():
     p.add_argument("--output-dir", help="Output directory (overrides config)")
     p.add_argument("--no-resume", action="store_true", help="Recompute all (ignore cache)")
     p.add_argument("--dtype", default=None, choices=["float16", "bfloat16", "float32"])
+    p.add_argument(
+        "--stories-dir",
+        help="Directory to save generated stories as JSONL (overrides config stories_dir)",
+    )
+    p.add_argument(
+        "--no-save-stories",
+        action="store_true",
+        help="Do not save generated stories to disk",
+    )
     return p.parse_args()
 
 
@@ -49,6 +62,18 @@ def main():
     output_dir = args.output_dir or cfg["emotion_vectors"]["output_dir"]
     aggregation = cfg["emotion_vectors"]["aggregation"]
     target_layers = cfg["emotion_vectors"]["target_layers"]
+
+    if args.no_save_stories:
+        stories_dir = None
+    elif args.stories_dir:
+        stories_dir = args.stories_dir
+    else:
+        stories_dir = cfg["emotion_vectors"].get("stories_dir")
+
+    if stories_dir:
+        print(f"Stories will be saved to: {stories_dir}/")
+    else:
+        print("Story saving disabled (--no-save-stories)")
 
     emotion_words = load_emotion_words("data/emotion_words.json")
     if args.emotions:
@@ -71,6 +96,7 @@ def main():
         target_layers=target_layers,
         story_prompt_template=cfg["generation"]["story_prompt_template"],
         neutral_prompt_template=cfg["generation"]["neutral_prompt_template"],
+        stories_dir=stories_dir,
     )
 
     vectors = extractor.extract_all(
@@ -82,7 +108,11 @@ def main():
     print(f"\nDone. Extracted {len(vectors)} emotion vectors.")
     print(f"Layers per vector: {sorted(next(iter(vectors.values())).keys())[:5]}...")
     print(f"Hidden size: {backend.hidden_size}")
-    print(f"Results saved to: {output_dir}/")
+    print(f"Vectors saved to: {output_dir}/")
+    if stories_dir:
+        from pathlib import Path
+        n_files = len(list(Path(stories_dir).glob("*.jsonl")))
+        print(f"Stories saved to: {stories_dir}/ ({n_files} JSONL files)")
 
 
 if __name__ == "__main__":
