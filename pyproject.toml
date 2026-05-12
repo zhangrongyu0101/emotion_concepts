@@ -1,0 +1,88 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "emotion-concepts"
+version = "0.1.0"
+description = "Replication of Anthropic's Emotion Concepts Function research with open-source models"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "numpy>=1.26.0",
+    "scipy>=1.12.0",
+    "scikit-learn>=1.4.0",
+    "requests>=2.31.0",
+    "pyyaml>=6.0.1",
+    "tqdm>=4.66.0",
+    "matplotlib>=3.8.0",
+    "seaborn>=0.13.0",
+]
+
+[project.optional-dependencies]
+# HuggingFace backend — full activation extraction + steering
+hf = [
+    "torch>=2.1.0",
+    "transformers>=4.40.0",
+    "accelerate>=0.27.0",
+    "sentencepiece>=0.2.0",
+    "protobuf>=4.25.0",
+]
+# 4-bit / 8-bit quantization (CUDA only)
+quantize = [
+    "bitsandbytes>=0.43.0",
+]
+# vLLM backend — fast inference, generation only
+vllm = [
+    "vllm>=0.4.0",
+]
+# SGLang backend — fast inference with structured generation
+sglang = [
+    "sglang[all]>=0.3.0",
+]
+# OpenAI-compatible client (for Ollama, LM Studio, vLLM server mode, etc.)
+openai = [
+    "openai>=1.14.0",
+]
+# Notebook analysis
+notebook = [
+    "jupyter>=1.0.0",
+    "ipykernel>=6.29.0",
+    "pandas>=2.2.0",
+]
+# Everything except platform-specific backends
+all = [
+    "torch>=2.1.0",
+    "transformers>=4.40.0",
+    "accelerate>=0.27.0",
+    "sentencepiece>=0.2.0",
+    "protobuf>=4.25.0",
+    "openai>=1.14.0",
+    "jupyter>=1.0.0",
+    "ipykernel>=6.29.0",
+    "pandas>=2.2.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[tool.uv]
+# Prefer binary wheels; avoid rebuilding heavy packages from source
+prerelease = "allow"
+
+[tool.uv.sources]
+# vLLM ships CUDA-specific wheels; point uv at the official index
+vllm = { index = "pytorch-cu121" }
+
+[[tool.uv.index]]
+name = "pytorch-cu121"
+url = "https://download.pytorch.org/whl/cu121"
+explicit = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]

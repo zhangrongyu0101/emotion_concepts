@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# uv / pip
+.venv/
+venv/
+.uv/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_output/
+
+# Model weights & large files
+*.pt
+*.bin
+*.safetensors
+*.gguf
+*.ggml
+
+# Results (generated at runtime — commit only if you want to share)
+results/
+!results/.gitkeep
+
+# HuggingFace cache
+~/.cache/huggingface/
+
+# Environment variables
+.env
+.env.*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Distribution
+*.tar.gz
+*.whl

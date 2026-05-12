@@ -1,0 +1,89 @@
+#!/usr/bin/env python3
+"""
+Step 1: Extract emotion vectors from the model.
+
+Usage:
+    python scripts/01_extract_vectors.py
+    python scripts/01_extract_vectors.py --model Qwen/Qwen2.5-7B-Instruct --device cuda
+    python scripts/01_extract_vectors.py --n-stories 5 --emotions happy sad angry
+"""
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+import yaml
+
+from src.emotion_vectors import EmotionVectorExtractor, load_emotion_words
+from src.models.hf_backend import HuggingFaceBackend
+
+
+def parse_args():
+    p = argparse.ArgumentParser(description="Extract emotion vectors via contrastive activation")
+    p.add_argument("--config", default="config/config.yaml")
+    p.add_argument("--model", help="HuggingFace model name (overrides config)")
+    p.add_argument("--device", help="Device: cuda / mps / cpu (overrides config)")
+    p.add_argument("--n-stories", type=int, help="Stories per emotion (overrides config)")
+    p.add_argument("--n-neutral", type=int, help="Neutral stories (overrides config)")
+    p.add_argument("--emotions", nargs="*", help="Subset of emotion words to process")
+    p.add_argument("--output-dir", help="Output directory (overrides config)")
+    p.add_argument("--no-resume", action="store_true", help="Recompute all (ignore cache)")
+    p.add_argument("--dtype", default=None, choices=["float16", "bfloat16", "float32"])
+    return p.parse_args()
+
+
+def main():
+    args = parse_args()
+
+    with open(args.config) as f:
+        cfg = yaml.safe_load(f)
+
+    model_name = args.model or cfg["model"]["hf_model_name"]
+    device = args.device or cfg["model"]["device"]
+    dtype = args.dtype or cfg["model"]["dtype"]
+    n_stories = args.n_stories or cfg["emotion_vectors"]["stories_per_emotion"]
+    n_neutral = args.n_neutral or cfg["emotion_vectors"]["neutral_stories"]
+    output_dir = args.output_dir or cfg["emotion_vectors"]["output_dir"]
+    aggregation = cfg["emotion_vectors"]["aggregation"]
+    target_layers = cfg["emotion_vectors"]["target_layers"]
+
+    emotion_words = load_emotion_words("data/emotion_words.json")
+    if args.emotions:
+        emotion_words = [e for e in emotion_words if e in args.emotions]
+        print(f"Processing {len(emotion_words)} emotions: {emotion_words}")
+
+    backend = HuggingFaceBackend(
+        model_name=model_name,
+        device=device,
+        dtype=dtype,
+        load_in_4bit=cfg["model"]["load_in_4bit"],
+        load_in_8bit=cfg["model"]["load_in_8bit"],
+    )
+
+    extractor = EmotionVectorExtractor(
+        backend=backend,
+        n_stories=n_stories,
+        n_neutral=n_neutral,
+        aggregation=aggregation,
+        target_layers=target_layers,
+        story_prompt_template=cfg["generation"]["story_prompt_template"],
+        neutral_prompt_template=cfg["generation"]["neutral_prompt_template"],
+    )
+
+    vectors = extractor.extract_all(
+        emotion_words=emotion_words,
+        output_dir=output_dir,
+        resume=not args.no_resume,
+    )
+
+    print(f"\nDone. Extracted {len(vectors)} emotion vectors.")
+    print(f"Layers per vector: {sorted(next(iter(vectors.values())).keys())[:5]}...")
+    print(f"Hidden size: {backend.hidden_size}")
+    print(f"Results saved to: {output_dir}/")
+
+
+if __name__ == "__main__":
+    main()

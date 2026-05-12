@@ -1,0 +1,35 @@
+{
+  "emotion_words": [
+    "happy", "sad", "angry", "afraid", "surprised", "disgusted", "anxious", "excited",
+    "bored", "content", "frustrated", "grateful", "proud", "ashamed", "guilty", "jealous",
+    "envious", "hopeful", "hopeless", "lonely", "loved", "hurt", "confused", "overwhelmed",
+    "calm", "tense", "relieved", "disappointed", "satisfied", "curious", "amused",
+    "enthusiastic", "melancholy", "nostalgic", "optimistic", "pessimistic", "depressed",
+    "elated", "serene", "irritated", "defensive", "vulnerable", "helpless", "confident",
+    "insecure", "terrified", "startled", "shocked", "awed", "wondering", "admiring",
+    "reverent", "pitying", "compassionate", "indifferent", "apathetic", "joyful",
+    "grieving", "enraged", "dreading", "panicking", "despairing", "ecstatic", "agonized",
+    "blissful", "miserable", "annoyed", "hostile", "resentful", "bitter", "hateful",
+    "adoring", "affectionate", "tender", "warm", "devoted", "passionate", "yearning",
+    "longing", "nostalgic", "regretful", "remorseful", "embarrassed", "humiliated",
+    "mortified", "awkward", "shy", "timid", "bold", "courageous", "fearless", "worried",
+    "nervous", "uneasy", "restless", "eager", "impatient", "irritable", "moody",
+    "sullen", "brooding", "pensive", "reflective", "contemplative", "inspired",
+    "motivated", "determined", "resigned", "defeated", "triumphant", "humble",
+    "arrogant", "generous", "kind", "gentle", "skeptical", "trusting", "distrustful",
+    "suspicious", "naive", "sophisticated", "wise", "foolish", "desperate", "hopeful",
+    "cheerful", "gloomy", "euphoric", "dejected", "exhilarated", "lethargic",
+    "invigorated", "drained", "energized", "fatigued", "alert", "drowsy", "focused",
+    "distracted", "absorbed", "scattered", "centered", "unmoored", "grounded",
+    "anxious", "tranquil", "agitated", "composed", "flustered", "collected",
+    "perturbed", "undisturbed", "rattled", "steady", "shaken", "stable",
+    "unsettled", "secure", "threatened", "empowered", "powerless", "capable",
+    "incompetent", "valued", "worthless", "appreciated", "neglected", "seen",
+    "invisible", "accepted", "rejected", "included", "excluded", "connected",
+    "isolated", "understood", "misunderstood", "validated", "invalidated"
+  ],
+  "neutral_control": [
+    "routine", "ordinary", "everyday", "typical", "standard", "normal", "regular",
+    "common", "usual", "conventional"
+  ]
+}

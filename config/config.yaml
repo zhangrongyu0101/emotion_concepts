@@ -1,0 +1,90 @@
+# Emotion Concepts Replication Configuration
+
+model:
+  # HuggingFace model for activation extraction (requires GPU for large models)
+  hf_model_name: "Qwen/Qwen2.5-7B-Instruct"
+  # Device: "cuda", "mps" (Apple Silicon), or "cpu"
+  device: "mps"
+  # dtype: "float16", "bfloat16", or "float32"
+  dtype: "float32"
+  # Load in 4-bit for memory efficiency (requires bitsandbytes)
+  load_in_4bit: false
+  # Load in 8-bit for memory efficiency (requires bitsandbytes)
+  load_in_8bit: false
+
+  # Ollama backend (for behavioral evaluation without activation access)
+  ollama_host: "http://localhost:11434"
+  ollama_model: "qwen2.5:7b"
+
+  # OpenAI-compatible API backend (works with vLLM server, LM Studio, etc.)
+  openai_base_url: "http://localhost:8000/v1"
+  openai_model: "qwen2.5-7b-instruct"
+  openai_api_key: "not-needed"
+
+  # vLLM in-process backend (install: pip install 'emotion-concepts[vllm]')
+  vllm_model: "Qwen/Qwen2.5-7B-Instruct"
+  vllm_tensor_parallel_size: 1
+  vllm_gpu_memory_utilization: 0.90
+  vllm_dtype: "auto"
+  vllm_quantization: null  # "awq", "gptq", or null
+
+  # SGLang in-process backend (install: pip install 'emotion-concepts[sglang]')
+  sglang_model: "Qwen/Qwen2.5-7B-Instruct"
+  sglang_tp_size: 1
+  sglang_mem_fraction_static: 0.88
+  sglang_dtype: "auto"
+  sglang_port: 30000
+
+  # SGLang server mode (run: python -m sglang.launch_server --model-path ... --port 30000)
+  sglang_server_url: "http://localhost:30000"
+
+emotion_vectors:
+  # Number of stories to generate per emotion word
+  stories_per_emotion: 10
+  # Number of neutral/control stories
+  neutral_stories: 30
+  # Layers to extract activations from (null = all layers)
+  target_layers: null
+  # Token aggregation strategy: "last", "mean", "max"
+  aggregation: "mean"
+  # Where to save extracted vectors
+  output_dir: "results/emotion_vectors"
+
+generation:
+  max_new_tokens: 300
+  temperature: 0.8
+  top_p: 0.95
+  do_sample: true
+  # Story generation prompt template
+  story_prompt_template: "Write a short story (2-3 paragraphs) about a character who is feeling {emotion}. Focus on how this emotion affects their thoughts, actions, and interactions."
+  neutral_prompt_template: "Write a short story (2-3 paragraphs) about a character going about their ordinary daily routine. Keep the tone neutral and matter-of-fact."
+
+validation:
+  # Corpus documents for validation testing
+  test_corpus_size: 100
+  # Sensitivity test: vary numerical quantities in prompts
+  sensitivity_test: true
+  output_dir: "results/validation"
+
+preference_analysis:
+  # Number of emotion steering levels to test
+  alpha_values: [-2.0, -1.0, 0.0, 1.0, 2.0]
+  # Layer to apply steering for preference tests
+  steering_layer: -1  # -1 = last third of network
+  output_dir: "results/preference"
+
+behavioral_eval:
+  # Number of trials per scenario
+  num_trials: 20
+  # Scenarios to evaluate
+  scenarios:
+    - "blackmail"
+    - "reward_hacking"
+  output_dir: "results/behavioral"
+
+steering:
+  # Layers to apply emotion steering
+  steering_layers: [10, 15, 20]
+  # Alpha values for steering strength
+  alpha_values: [-3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0]
+  output_dir: "results/steering"
