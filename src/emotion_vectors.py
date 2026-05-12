@@ -30,6 +30,7 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
+from .models.base import BaseBackend
 from .models.hf_backend import HuggingFaceBackend
 
 
@@ -54,6 +55,148 @@ def load_neutral_words(data_path: str = "data/emotion_words.json") -> list[str]:
         return json.load(f)["neutral_control"]
 
 
+def load_stories_from_dir(stories_dir: str) -> dict[str, list[dict]]:
+    """
+    Load pre-generated stories from a directory of JSONL files.
+
+    Returns dict mapping emotion label (or "neutral") -> list of story records.
+    Each record: {"emotion", "index", "prompt", "story", "timestamp"}.
+    """
+    path = Path(stories_dir)
+    stories: dict[str, list[dict]] = {}
+    for jsonl_file in sorted(path.glob("*.jsonl")):
+        label = jsonl_file.stem  # e.g. "happy", "neutral"
+        records = []
+        with open(jsonl_file, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    records.append(json.loads(line))
+        stories[label] = records
+    return stories
+
+
+class StoryGenerator:
+    """
+    Standalone story generator — any backend, no HuggingFace required.
+
+    Generates and saves stories for all emotion words and neutral baseline.
+    Output is a directory of JSONL files that can later be fed into
+    EmotionVectorExtractor.extract_from_stories().
+
+    Use this with vLLM or SGLang for fast concurrent generation, then run
+    extraction separately with the HuggingFace backend.
+    """
+
+    def __init__(
+        self,
+        backend: BaseBackend,
+        n_stories: int = 10,
+        n_neutral: int = 30,
+        story_prompt_template: str = STORY_PROMPT,
+        neutral_prompt_template: str = NEUTRAL_PROMPT,
+        max_concurrent: int = 64,
+    ):
+        self.backend = backend
+        self.n_stories = n_stories
+        self.n_neutral = n_neutral
+        self.story_prompt = story_prompt_template
+        self.neutral_prompt = neutral_prompt_template
+        self.max_concurrent = max_concurrent
+
+    def _save_records(self, records: list[dict], stories_dir: Path) -> None:
+        by_label: dict[str, list[dict]] = {}
+        for r in records:
+            label = (r["emotion"] or "neutral").replace(" ", "_")
+            by_label.setdefault(label, []).append(r)
+        for label, recs in by_label.items():
+            path = stories_dir / f"{label}.jsonl"
+            with open(path, "a", encoding="utf-8") as f:
+                for r in recs:
+                    f.write(json.dumps(r, ensure_ascii=False) + "\n")
+
+    def generate_all(
+        self,
+        emotion_words: list[str],
+        stories_dir: str,
+        resume: bool = True,
+    ) -> None:
+        """
+        Generate all stories and save to `stories_dir` as JSONL.
+
+        Args:
+            emotion_words: List of emotion words.
+            stories_dir: Output directory (created if absent).
+            resume: Skip emotions whose JSONL file already has enough stories.
+        """
+        out = Path(stories_dir)
+        out.mkdir(parents=True, exist_ok=True)
+
+        # ── Neutral baseline ──────────────────────────────────────────────────
+        neutral_path = out / "neutral.jsonl"
+        existing_neutral = 0
+        if resume and neutral_path.exists():
+            with open(neutral_path) as f:
+                existing_neutral = sum(1 for l in f if l.strip())
+
+        remaining_neutral = max(0, self.n_neutral - existing_neutral)
+        if remaining_neutral > 0:
+            print(f"Generating {remaining_neutral} neutral stories (concurrent)...")
+            prompts = [self.neutral_prompt] * remaining_neutral
+            stories = self.backend.generate_concurrent(
+                prompts, max_concurrent=self.max_concurrent,
+                max_new_tokens=300, temperature=0.8,
+            )
+            records = [
+                {
+                    "emotion": None,
+                    "index": existing_neutral + i,
+                    "prompt": self.neutral_prompt,
+                    "story": s,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+                for i, s in enumerate(stories)
+            ]
+            self._save_records(records, out)
+            print(f"  Saved {len(records)} neutral stories → {neutral_path}")
+        else:
+            print(f"Neutral stories already complete ({existing_neutral}/{self.n_neutral}), skipping.")
+
+        # ── Emotion stories ───────────────────────────────────────────────────
+        for emotion in tqdm(emotion_words, desc="Generating emotion stories"):
+            label = emotion.replace(" ", "_")
+            emotion_path = out / f"{label}.jsonl"
+            existing = 0
+            if resume and emotion_path.exists():
+                with open(emotion_path) as f:
+                    existing = sum(1 for l in f if l.strip())
+
+            remaining = max(0, self.n_stories - existing)
+            if remaining == 0:
+                continue
+
+            prompt = self.story_prompt.format(emotion=emotion)
+            stories = self.backend.generate_concurrent(
+                [prompt] * remaining,
+                max_concurrent=self.max_concurrent,
+                max_new_tokens=300,
+                temperature=0.8,
+            )
+            records = [
+                {
+                    "emotion": emotion,
+                    "index": existing + i,
+                    "prompt": prompt,
+                    "story": s,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+                for i, s in enumerate(stories)
+            ]
+            self._save_records(records, out)
+
+        print(f"\nStory generation complete → {stories_dir}/")
+
+
 class EmotionVectorExtractor:
     """
     Extracts emotion vectors via contrastive activation analysis.
@@ -66,6 +209,12 @@ class EmotionVectorExtractor:
          (sequential per story, HuggingFace only).
       4. emotion_vector[layer] = mean(emotion_acts) - mean(neutral_acts)
       5. Normalize to unit sphere.
+
+    Two-backend workflow (vLLM → HuggingFace)
+    ------------------------------------------
+    1. Run StoryGenerator with vLLM to generate and save all stories.
+    2. Run EmotionVectorExtractor.extract_from_stories() with HuggingFace
+       to extract activations from the saved JSONL files.
     """
 
     def __init__(
@@ -265,6 +414,98 @@ class EmotionVectorExtractor:
             "hidden_size": self.backend.hidden_size,
             "max_concurrent": self.max_concurrent,
             "stories_dir": str(self.stories_dir) if self.stories_dir else None,
+        }
+        with open(output_path / "metadata.json", "w") as f:
+            json.dump(meta, f, indent=2)
+
+        print(f"\nExtracted {len(all_vectors)} emotion vectors → {output_dir}/")
+        return all_vectors
+
+    def extract_from_stories(
+        self,
+        stories_dir: str,
+        output_dir: str = "results/emotion_vectors",
+        resume: bool = True,
+    ) -> dict[str, dict[int, torch.Tensor]]:
+        """
+        Extract emotion vectors from pre-generated JSONL story files.
+
+        Use this when you generated stories with a fast backend (vLLM, SGLang)
+        and now want to extract activations with the HuggingFace backend.
+
+        Args:
+            stories_dir: Directory containing <emotion>.jsonl files.
+            output_dir: Where to write .pt vector files.
+            resume: Skip emotions whose .pt already exists.
+        """
+        all_stories = load_stories_from_dir(stories_dir)
+        if not all_stories:
+            raise FileNotFoundError(f"No .jsonl files found in {stories_dir}")
+
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+
+        # ── Neutral activations ───────────────────────────────────────────────
+        neutral_cache = output_path / "neutral_activations.pt"
+        if resume and neutral_cache.exists():
+            print("Loading cached neutral activations...")
+            neutral_acts = torch.load(neutral_cache, weights_only=False)
+        else:
+            neutral_records = all_stories.get("neutral", [])
+            if not neutral_records:
+                raise ValueError("No neutral.jsonl found in stories_dir")
+            print(f"Extracting {len(neutral_records)} neutral activations...")
+            neutral_acts: dict[int, list[torch.Tensor]] = {l: [] for l in self.target_layers}
+            for rec in tqdm(neutral_records, desc="Neutral activations"):
+                acts = self.backend.get_activations(
+                    rec["prompt"] + rec["story"],
+                    layers=self.target_layers,
+                    aggregation=self.aggregation,
+                )
+                for layer, act in acts.items():
+                    neutral_acts[layer].append(act)
+            torch.save(neutral_acts, neutral_cache)
+
+        # ── Per-emotion vectors ───────────────────────────────────────────────
+        emotion_labels = [k for k in all_stories if k != "neutral"]
+        all_vectors: dict[str, dict[int, torch.Tensor]] = {}
+
+        for label in tqdm(emotion_labels, desc="Extracting emotion vectors"):
+            emotion = label.replace("_", " ")
+            save_path = output_path / f"{label}.pt"
+            if resume and save_path.exists():
+                print(f"  Skipping '{emotion}' (cached)")
+                all_vectors[emotion] = torch.load(save_path, weights_only=False)
+                continue
+
+            records = all_stories[label]
+            emotion_acts: dict[int, list[torch.Tensor]] = {l: [] for l in self.target_layers}
+            for rec in records:
+                acts = self.backend.get_activations(
+                    rec["prompt"] + rec["story"],
+                    layers=self.target_layers,
+                    aggregation=self.aggregation,
+                )
+                for layer, act in acts.items():
+                    emotion_acts[layer].append(act)
+
+            vectors: dict[int, torch.Tensor] = {}
+            for layer in self.target_layers:
+                mean_e = torch.stack(emotion_acts[layer]).mean(dim=0)
+                mean_n = torch.stack(neutral_acts[layer]).mean(dim=0)
+                diff = mean_e - mean_n
+                vectors[layer] = diff / (diff.norm() + 1e-8)
+
+            all_vectors[emotion] = vectors
+            torch.save(vectors, save_path)
+
+        meta = {
+            "emotions": [l.replace("_", " ") for l in emotion_labels],
+            "layers": self.target_layers,
+            "aggregation": self.aggregation,
+            "hidden_size": self.backend.hidden_size,
+            "stories_dir": str(stories_dir),
+            "source": "extract_from_stories",
         }
         with open(output_path / "metadata.json", "w") as f:
             json.dump(meta, f, indent=2)
