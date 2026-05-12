@@ -4,13 +4,24 @@ Emotion Vector Extraction
 Implements Contrastive Activation Addition (CAA):
 For each emotion word, generate stories featuring that emotion and neutral stories.
 Compute emotion_vector[layer] = mean(emotion_activations) - mean(neutral_activations).
+
+Concurrency design
+------------------
+Story generation and activation extraction are separated into two phases:
+
+  Phase 1 (concurrent): Send all N prompts to the backend at once via
+      generate_concurrent(). vLLM uses continuous batching; SGLang uses
+      run_batch(); HuggingFace uses batched tokenisation; Ollama uses a
+      thread pool. All are faster than N sequential calls.
+
+  Phase 2 (sequential): Run each (prompt + story) through the HuggingFace
+      model to collect residual-stream activations. Activation extraction
+      cannot be batched without losing per-sample precision.
 """
 
 from __future__ import annotations
 
 import json
-import os
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -35,14 +46,12 @@ NEUTRAL_PROMPT = (
 
 def load_emotion_words(data_path: str = "data/emotion_words.json") -> list[str]:
     with open(data_path) as f:
-        data = json.load(f)
-    return data["emotion_words"]
+        return json.load(f)["emotion_words"]
 
 
 def load_neutral_words(data_path: str = "data/emotion_words.json") -> list[str]:
     with open(data_path) as f:
-        data = json.load(f)
-    return data["neutral_control"]
+        return json.load(f)["neutral_control"]
 
 
 class EmotionVectorExtractor:
@@ -50,9 +59,11 @@ class EmotionVectorExtractor:
     Extracts emotion vectors via contrastive activation analysis.
 
     Algorithm:
-      1. For each emotion word, generate `n_stories` stories via the LLM.
-      2. Generate `n_neutral` neutral stories as the baseline.
-      3. Extract residual stream activations at each transformer layer.
+      1. For each emotion word, generate `n_stories` stories via the LLM
+         (concurrent — all prompts sent at once).
+      2. Generate `n_neutral` neutral stories as the baseline (concurrent).
+      3. Extract residual-stream activations at each transformer layer
+         (sequential per story, HuggingFace only).
       4. emotion_vector[layer] = mean(emotion_acts) - mean(neutral_acts)
       5. Normalize to unit sphere.
     """
@@ -67,12 +78,19 @@ class EmotionVectorExtractor:
         story_prompt_template: str = STORY_PROMPT,
         neutral_prompt_template: str = NEUTRAL_PROMPT,
         stories_dir: Optional[str] = None,
+        max_concurrent: int = 32,
     ):
         """
         Args:
-            stories_dir: If set, generated stories are saved as JSONL files under
-                         this directory (one file per emotion + one for neutral).
-                         Existing files are appended to, enabling resume.
+            backend: HuggingFace model backend (required for activation extraction).
+            n_stories: Stories generated per emotion word.
+            n_neutral: Neutral baseline stories.
+            aggregation: How to reduce sequence dim — "mean" | "last".
+            target_layers: Layers to extract (None = all layers).
+            stories_dir: If set, save each story as a JSONL record here.
+            max_concurrent: Batch size passed to generate_concurrent().
+                            For HF: mini-batch size.
+                            For vLLM/SGLang: ignored (they handle it internally).
         """
         self.backend = backend
         self.n_stories = n_stories
@@ -80,76 +98,124 @@ class EmotionVectorExtractor:
         self.aggregation = aggregation
         self.story_prompt = story_prompt_template
         self.neutral_prompt = neutral_prompt_template
+        self.max_concurrent = max_concurrent
         self.stories_dir = Path(stories_dir) if stories_dir else None
         if self.stories_dir:
             self.stories_dir.mkdir(parents=True, exist_ok=True)
 
-        num_layers = backend.num_layers
-        self.target_layers = target_layers if target_layers else list(range(num_layers))
+        self.target_layers = target_layers if target_layers else list(range(backend.num_layers))
 
-    def _save_story(self, record: dict) -> None:
-        """Append one story record to its JSONL file (one line per story)."""
+    # ── Story persistence ──────────────────────────────────────────────────────
+
+    def _save_stories(self, records: list[dict]) -> None:
+        """Append a batch of story records to their JSONL files."""
         if self.stories_dir is None:
             return
-        label = record["emotion"] if record["emotion"] else "neutral"
-        path = self.stories_dir / f"{label.replace(' ', '_')}.jsonl"
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        # Group by emotion label so we open each file at most once per call
+        by_label: dict[str, list[dict]] = {}
+        for r in records:
+            label = r["emotion"] if r["emotion"] else "neutral"
+            by_label.setdefault(label.replace(" ", "_"), []).append(r)
+        for label, recs in by_label.items():
+            path = self.stories_dir / f"{label}.jsonl"
+            with open(path, "a", encoding="utf-8") as f:
+                for r in recs:
+                    f.write(json.dumps(r, ensure_ascii=False) + "\n")
 
-    def _generate_and_extract(
-        self, prompt: str, emotion: Optional[str], index: int
-    ) -> dict[int, torch.Tensor]:
-        """Generate a story, optionally save it, then extract activations."""
-        story = self.backend.generate(prompt, max_new_tokens=300, temperature=0.8)
-        self._save_story({
-            "emotion": emotion,
-            "index": index,
-            "prompt": prompt,
-            "story": story,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        })
-        full_text = prompt + story
-        return self.backend.get_activations(
-            full_text, layers=self.target_layers, aggregation=self.aggregation
+    # ── Phase 1: concurrent generation ────────────────────────────────────────
+
+    def _generate_stories(
+        self,
+        prompt: str,
+        n: int,
+        emotion: Optional[str],
+    ) -> list[str]:
+        """
+        Generate `n` stories concurrently and optionally save them.
+
+        Returns a list of generated story strings (no prompt prefix).
+        """
+        prompts = [prompt] * n
+        stories = self.backend.generate_concurrent(
+            prompts,
+            max_concurrent=self.max_concurrent,
+            max_new_tokens=300,
+            temperature=0.8,
+            top_p=0.95,
         )
+        self._save_stories([
+            {
+                "emotion": emotion,
+                "index": i,
+                "prompt": prompt,
+                "story": s,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+            for i, s in enumerate(stories)
+        ])
+        return stories
+
+    # ── Phase 2: sequential activation extraction ─────────────────────────────
+
+    def _extract_activations(
+        self, prompt: str, stories: list[str]
+    ) -> dict[int, list[torch.Tensor]]:
+        """
+        Extract residual-stream activations for each story (sequential).
+
+        Returns dict mapping layer -> list of activation tensors.
+        """
+        layer_acts: dict[int, list[torch.Tensor]] = {l: [] for l in self.target_layers}
+        for story in stories:
+            acts = self.backend.get_activations(
+                prompt + story,
+                layers=self.target_layers,
+                aggregation=self.aggregation,
+            )
+            for layer, act in acts.items():
+                layer_acts[layer].append(act)
+        return layer_acts
+
+    # ── Neutral baseline ───────────────────────────────────────────────────────
 
     def _collect_neutral_activations(self) -> dict[int, list[torch.Tensor]]:
-        print(f"Collecting {self.n_neutral} neutral baseline activations...")
-        neutral_acts: dict[int, list[torch.Tensor]] = {l: [] for l in self.target_layers}
+        print(f"Generating {self.n_neutral} neutral stories (concurrent)...")
+        stories = self._generate_stories(self.neutral_prompt, self.n_neutral, emotion=None)
+        print("Extracting neutral activations (sequential)...")
+        return self._extract_activations(self.neutral_prompt, stories)
 
-        for i in tqdm(range(self.n_neutral), desc="Neutral stories"):
-            acts = self._generate_and_extract(self.neutral_prompt, emotion=None, index=i)
-            for layer, act in acts.items():
-                neutral_acts[layer].append(act)
-
-        return neutral_acts
+    # ── Per-emotion vector ─────────────────────────────────────────────────────
 
     def extract_emotion_vector(
-        self, emotion: str, neutral_acts: dict[int, list[torch.Tensor]]
+        self,
+        emotion: str,
+        neutral_acts: dict[int, list[torch.Tensor]],
     ) -> dict[int, torch.Tensor]:
         """
-        Compute the emotion vector for a single emotion word.
+        Compute the contrastive emotion vector for one emotion word.
 
-        Returns dict mapping layer -> normalized emotion vector.
+        Phase 1: generate all n_stories concurrently.
+        Phase 2: extract activations sequentially.
+        Phase 3: mean(emotion) - mean(neutral), L2-normalize.
         """
-        emotion_acts: dict[int, list[torch.Tensor]] = {l: [] for l in self.target_layers}
         prompt = self.story_prompt.format(emotion=emotion)
 
-        for i in range(self.n_stories):
-            acts = self._generate_and_extract(prompt, emotion=emotion, index=i)
-            for layer, act in acts.items():
-                emotion_acts[layer].append(act)
+        print(f"  Generating {self.n_stories} stories for '{emotion}' (concurrent)...")
+        stories = self._generate_stories(prompt, self.n_stories, emotion=emotion)
+
+        print(f"  Extracting activations for '{emotion}' (sequential)...")
+        emotion_acts = self._extract_activations(prompt, stories)
 
         vectors: dict[int, torch.Tensor] = {}
         for layer in self.target_layers:
-            mean_emotion = torch.stack(emotion_acts[layer]).mean(dim=0)
-            mean_neutral = torch.stack(neutral_acts[layer]).mean(dim=0)
-            diff = mean_emotion - mean_neutral
-            # L2 normalize
-            norm = diff.norm()
-            vectors[layer] = diff / (norm + 1e-8)
+            mean_e = torch.stack(emotion_acts[layer]).mean(dim=0)
+            mean_n = torch.stack(neutral_acts[layer]).mean(dim=0)
+            diff = mean_e - mean_n
+            vectors[layer] = diff / (diff.norm() + 1e-8)
 
         return vectors
+
+    # ── Full extraction pipeline ───────────────────────────────────────────────
 
     def extract_all(
         self,
@@ -162,11 +228,8 @@ class EmotionVectorExtractor:
 
         Args:
             emotion_words: List of emotion words to process.
-            output_dir: Directory to save results.
-            resume: If True, skip emotions that already have saved vectors.
-
-        Returns:
-            Dict mapping emotion_word -> {layer -> vector}.
+            output_dir: Directory to save vectors.
+            resume: Skip emotions that already have a saved .pt file.
         """
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
@@ -182,19 +245,17 @@ class EmotionVectorExtractor:
 
         all_vectors: dict[str, dict[int, torch.Tensor]] = {}
 
-        for emotion in tqdm(emotion_words, desc="Extracting emotion vectors"):
+        for emotion in tqdm(emotion_words, desc="Emotions"):
             save_path = output_path / f"{emotion.replace(' ', '_')}.pt"
             if resume and save_path.exists():
-                print(f"  Skipping {emotion} (cached)")
+                print(f"  Skipping '{emotion}' (cached)")
                 all_vectors[emotion] = torch.load(save_path, weights_only=False)
                 continue
 
-            print(f"\nExtracting vector for: {emotion}")
             vectors = self.extract_emotion_vector(emotion, neutral_acts)
             all_vectors[emotion] = vectors
             torch.save(vectors, save_path)
 
-        # Save summary metadata
         meta = {
             "emotions": emotion_words,
             "layers": self.target_layers,
@@ -202,41 +263,33 @@ class EmotionVectorExtractor:
             "n_neutral": self.n_neutral,
             "aggregation": self.aggregation,
             "hidden_size": self.backend.hidden_size,
+            "max_concurrent": self.max_concurrent,
             "stories_dir": str(self.stories_dir) if self.stories_dir else None,
         }
         with open(output_path / "metadata.json", "w") as f:
             json.dump(meta, f, indent=2)
 
-        print(f"\nExtracted vectors for {len(all_vectors)} emotions -> {output_dir}")
+        print(f"\nExtracted {len(all_vectors)} emotion vectors → {output_dir}/")
         return all_vectors
 
+
+# ── Utilities ──────────────────────────────────────────────────────────────────
 
 def load_emotion_vectors(
     output_dir: str = "results/emotion_vectors",
 ) -> dict[str, dict[int, torch.Tensor]]:
-    """Load previously extracted emotion vectors from disk."""
     path = Path(output_dir)
-    meta_path = path / "metadata.json"
-
-    if not meta_path.exists():
-        raise FileNotFoundError(f"No metadata found in {output_dir}. Run extraction first.")
-
-    with open(meta_path) as f:
+    with open(path / "metadata.json") as f:
         meta = json.load(f)
-
-    vectors: dict[str, dict[int, torch.Tensor]] = {}
-    for emotion in meta["emotions"]:
-        pt_path = path / f"{emotion.replace(' ', '_')}.pt"
-        if pt_path.exists():
-            vectors[emotion] = torch.load(pt_path, weights_only=False)
-
-    return vectors
+    return {
+        emotion: torch.load(path / f"{emotion.replace(' ', '_')}.pt", weights_only=False)
+        for emotion in meta["emotions"]
+        if (path / f"{emotion.replace(' ', '_')}.pt").exists()
+    }
 
 
 def cosine_similarity(a: torch.Tensor, b: torch.Tensor) -> float:
-    """Compute cosine similarity between two vectors."""
-    a = a.float()
-    b = b.float()
+    a, b = a.float(), b.float()
     return (a @ b / (a.norm() * b.norm() + 1e-8)).item()
 
 
@@ -244,22 +297,13 @@ def compute_similarity_matrix(
     vectors: dict[str, dict[int, torch.Tensor]],
     layer: int,
 ) -> tuple[np.ndarray, list[str]]:
-    """
-    Compute pairwise cosine similarity matrix between all emotion vectors at a given layer.
-
-    Returns (similarity_matrix, emotion_labels).
-    """
     emotions = list(vectors.keys())
     n = len(emotions)
-    sim_matrix = np.zeros((n, n))
-
+    sim = np.zeros((n, n))
     for i, e1 in enumerate(emotions):
         for j, e2 in enumerate(emotions):
-            v1 = vectors[e1][layer]
-            v2 = vectors[e2][layer]
-            sim_matrix[i, j] = cosine_similarity(v1, v2)
-
-    return sim_matrix, emotions
+            sim[i, j] = cosine_similarity(vectors[e1][layer], vectors[e2][layer])
+    return sim, emotions
 
 
 def project_vectors_2d(
@@ -267,23 +311,15 @@ def project_vectors_2d(
     layer: int,
     method: str = "pca",
 ) -> tuple[np.ndarray, list[str]]:
-    """
-    Project emotion vectors to 2D for visualization.
-
-    Args:
-        method: "pca" or "tsne"
-    """
     emotions = list(vectors.keys())
     matrix = np.stack([vectors[e][layer].numpy() for e in emotions])
-
     if method == "pca":
         from sklearn.decomposition import PCA
-        reducer = PCA(n_components=2)
+        coords = PCA(n_components=2).fit_transform(matrix)
     elif method == "tsne":
         from sklearn.manifold import TSNE
-        reducer = TSNE(n_components=2, random_state=42, perplexity=min(30, len(emotions) - 1))
+        coords = TSNE(n_components=2, random_state=42,
+                      perplexity=min(30, len(emotions) - 1)).fit_transform(matrix)
     else:
         raise ValueError(f"Unknown method: {method}")
-
-    coords = reducer.fit_transform(matrix)
     return coords, emotions

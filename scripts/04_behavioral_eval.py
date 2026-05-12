@@ -47,6 +47,7 @@ def parse_args():
     p.add_argument("--alpha-values", nargs="*", type=float, help="Alpha values for steering")
     p.add_argument("--n-trials", type=int, default=5, help="Trials per condition")
     p.add_argument("--baseline-only", action="store_true", help="Skip steering experiments")
+    p.add_argument("--max-concurrent", type=int, help="Max concurrent requests (overrides config)")
     return p.parse_args()
 
 
@@ -114,11 +115,14 @@ def main():
         steering_layers = [layer]
         print(f"Steering at layer {layer}")
 
+    max_concurrent = args.max_concurrent or cfg.get("concurrency", {}).get("max_concurrent", 32)
+
     evaluator = BehavioralEvaluator(
         backend=backend,
         emotion_vectors=vectors,
         steering_layers=steering_layers,
         n_trials=args.n_trials,
+        max_concurrent=max_concurrent,
     )
 
     emotions = [e for e in (args.emotions or KEY_EMOTIONS) if e in vectors]

@@ -53,31 +53,27 @@ class PreferenceAnalyzer:
     """
     Measures how emotion steering affects model willingness to perform activities.
 
-    For each activity, collects willingness ratings at different steering strengths
-    (alpha values), then analyzes correlations between emotions and activity harm level.
+    Concurrency
+    -----------
+    run_baseline() submits all (activities × n_trials) prompts as a single
+    generate_concurrent() call — the backend decides how to schedule them.
+    Steered conditions use sequential generation (HF steering hooks are not
+    thread-safe).
     """
 
     def __init__(
         self,
-        backend: HuggingFaceBackend,
+        backend,
         emotion_vectors: dict[str, dict[int, torch.Tensor]],
         steering_layers: list[int],
         n_trials: int = 3,
+        max_concurrent: int = 64,
     ):
         self.backend = backend
         self.vectors = emotion_vectors
         self.steering_layers = steering_layers
         self.n_trials = n_trials
-
-    def _get_rating_unsteered(self, activity: str) -> Optional[float]:
-        prompt = PREFERENCE_PROMPT.format(activity=activity)
-        ratings = []
-        for _ in range(self.n_trials):
-            out = self.backend.generate(prompt, max_new_tokens=10, temperature=0.1)
-            r = parse_rating(out)
-            if r is not None:
-                ratings.append(r)
-        return float(np.mean(ratings)) if ratings else None
+        self.max_concurrent = max_concurrent
 
     def _get_rating_steered(
         self,
@@ -105,18 +101,42 @@ class PreferenceAnalyzer:
         activities: list[dict],
         output_dir: str = "results/preference",
     ) -> list[dict]:
-        """Collect baseline (unsteered) willingness ratings for all activities."""
-        Path(output_dir).mkdir(parents=True, exist_ok=True)
-        results = []
+        """
+        Collect baseline willingness ratings for all activities.
 
-        for activity in tqdm(activities, desc="Baseline preference ratings"):
-            rating = self._get_rating_unsteered(activity["text"])
+        All (activities × n_trials) prompts are submitted concurrently.
+        """
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+
+        # Build flat prompt list: activity0×trial0, activity0×trial1, ..., activityN×trialM
+        prompts = [
+            PREFERENCE_PROMPT.format(activity=a["text"])
+            for a in activities
+            for _ in range(self.n_trials)
+        ]
+        print(f"Rating {len(activities)} activities × {self.n_trials} trials "
+              f"= {len(prompts)} requests (concurrent)...")
+
+        raw_outputs = self.backend.generate_concurrent(
+            prompts,
+            max_concurrent=self.max_concurrent,
+            max_new_tokens=10,
+            temperature=0.1,
+            do_sample=False,
+        )
+
+        # Reshape: group n_trials outputs per activity and average
+        results = []
+        for i, activity in enumerate(activities):
+            chunk = raw_outputs[i * self.n_trials : (i + 1) * self.n_trials]
+            ratings = [parse_rating(o) for o in chunk]
+            valid = [r for r in ratings if r is not None]
             results.append({
                 "id": activity["id"],
                 "text": activity["text"],
                 "category": activity["category"],
                 "harm_level": activity["harm_level"],
-                "baseline_rating": rating,
+                "baseline_rating": float(np.mean(valid)) if valid else None,
             })
 
         with open(Path(output_dir) / "baseline_ratings.json", "w") as f:

@@ -45,6 +45,11 @@ def parse_args():
         action="store_true",
         help="Do not save generated stories to disk",
     )
+    p.add_argument(
+        "--max-concurrent",
+        type=int,
+        help="Batch size for concurrent generation (overrides config)",
+    )
     return p.parse_args()
 
 
@@ -88,6 +93,9 @@ def main():
         load_in_8bit=cfg["model"]["load_in_8bit"],
     )
 
+    max_concurrent = args.max_concurrent or cfg.get("concurrency", {}).get("max_concurrent", 32)
+    print(f"Concurrency: max_concurrent={max_concurrent}")
+
     extractor = EmotionVectorExtractor(
         backend=backend,
         n_stories=n_stories,
@@ -97,6 +105,7 @@ def main():
         story_prompt_template=cfg["generation"]["story_prompt_template"],
         neutral_prompt_template=cfg["generation"]["neutral_prompt_template"],
         stories_dir=stories_dir,
+        max_concurrent=max_concurrent,
     )
 
     vectors = extractor.extract_all(

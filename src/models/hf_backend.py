@@ -84,8 +84,36 @@ class HuggingFaceBackend(BaseBackend):
         top_p: float = 0.95,
         do_sample: bool = True,
     ) -> str:
+        return self.generate_batch(
+            [prompt],
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            do_sample=do_sample,
+        )[0]
+
+    def generate_batch(
+        self,
+        prompts: list[str],
+        max_new_tokens: int = 300,
+        temperature: float = 0.8,
+        top_p: float = 0.95,
+        do_sample: bool = True,
+    ) -> list[str]:
+        """
+        Generate text for a batch of prompts in one forward pass.
+
+        Prompts are left-padded to the same length so the model sees consistent
+        attention patterns. Use this when you have multiple independent prompts
+        and want to maximise GPU utilisation.
+        """
+        # Left-pad so all sequences end at the same position (better for generation)
+        self.tokenizer.padding_side = "left"
         inputs = self.tokenizer(
-            prompt, return_tensors="pt", padding=True
+            prompts,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
         ).to(self.device)
         input_len = inputs["input_ids"].shape[1]
 
@@ -99,8 +127,29 @@ class HuggingFaceBackend(BaseBackend):
                 pad_token_id=self.tokenizer.pad_token_id,
             )
 
-        generated = outputs[0][input_len:]
-        return self.tokenizer.decode(generated, skip_special_tokens=True)
+        return [
+            self.tokenizer.decode(o[input_len:], skip_special_tokens=True)
+            for o in outputs
+        ]
+
+    def generate_concurrent(
+        self,
+        prompts: list[str],
+        max_concurrent: int = 8,
+        **kwargs,
+    ) -> list[str]:
+        """
+        Generate for multiple prompts using HuggingFace batched generation.
+
+        Groups prompts into mini-batches of size `max_concurrent` to balance
+        GPU memory usage vs. throughput.  Prompts within each mini-batch are
+        processed in a single model.generate() call.
+        """
+        results: list[str] = []
+        for start in range(0, len(prompts), max_concurrent):
+            batch = prompts[start : start + max_concurrent]
+            results.extend(self.generate_batch(batch, **kwargs))
+        return results
 
     def get_activations(
         self,

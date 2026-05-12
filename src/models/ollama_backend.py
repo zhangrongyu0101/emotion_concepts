@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 
 import requests
@@ -14,6 +14,9 @@ class OllamaBackend(BaseBackend):
 
     Supports text generation only — no activation extraction or steering.
     Use this backend for behavioral evaluation experiments.
+
+    generate_concurrent() opens multiple parallel HTTP connections to Ollama
+    (Ollama handles concurrent requests on a single process).
     """
 
     def __init__(
@@ -21,10 +24,18 @@ class OllamaBackend(BaseBackend):
         model: str = "qwen2.5:7b",
         host: str = "http://localhost:11434",
         timeout: int = 120,
+        max_concurrent: int = 4,
     ):
+        """
+        Args:
+            max_concurrent: Max parallel requests to Ollama. Ollama runs requests
+                sequentially by default — set OLLAMA_NUM_PARALLEL env var to
+                enable server-side concurrency before increasing this.
+        """
         self._model = model
         self._host = host.rstrip("/")
         self._timeout = timeout
+        self._default_max_concurrent = max_concurrent
         self._verify_connection()
 
     def _verify_connection(self):
@@ -68,6 +79,29 @@ class OllamaBackend(BaseBackend):
         )
         resp.raise_for_status()
         return resp.json()["response"]
+
+    def generate_concurrent(
+        self,
+        prompts: list[str],
+        max_concurrent: int | None = None,
+        **kwargs,
+    ) -> list[str]:
+        """
+        Send multiple requests to Ollama in parallel via a thread pool.
+
+        Tip: set OLLAMA_NUM_PARALLEL=N before `ollama serve` to allow the
+        server to handle N requests simultaneously instead of queuing them.
+        """
+        n_workers = max_concurrent or self._default_max_concurrent
+        results: list[str | None] = [None] * len(prompts)
+        with ThreadPoolExecutor(max_workers=min(n_workers, len(prompts))) as executor:
+            future_to_idx = {
+                executor.submit(self.generate, p, **kwargs): i
+                for i, p in enumerate(prompts)
+            }
+            for future in as_completed(future_to_idx):
+                results[future_to_idx[future]] = future.result()
+        return results  # type: ignore[return-value]
 
     def chat(
         self,

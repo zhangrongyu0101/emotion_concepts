@@ -183,19 +183,27 @@ class BehavioralEvaluator:
     Runs behavioral evaluation experiments with and without emotion steering.
 
     Measures the causal effect of emotion vectors on unsafe behavior rates.
+
+    Concurrency
+    -----------
+    All baseline methods (no steering) use generate_concurrent() to submit
+    all trial prompts at once.  Steered conditions require HuggingFaceBackend
+    and run sequentially (steering hooks are not thread-safe).
     """
 
     def __init__(
         self,
-        backend: HuggingFaceBackend,
+        backend: BaseBackend,
         emotion_vectors: Optional[dict[str, dict[int, torch.Tensor]]] = None,
         steering_layers: Optional[list[int]] = None,
         n_trials: int = 20,
+        max_concurrent: int = 32,
     ):
         self.backend = backend
         self.vectors = emotion_vectors or {}
         self.steering_layers = steering_layers or []
         self.n_trials = n_trials
+        self.max_concurrent = max_concurrent
 
     def _run_blackmail_trial(
         self,
@@ -258,19 +266,41 @@ class BehavioralEvaluator:
             engaged_unsafely=detection["is_reward_hacking"],
         )
 
+    # ── Concurrent baseline helpers ────────────────────────────────────────────
+
+    def _batch_detect(
+        self,
+        prompts: list[str],
+        detect_fn,
+        max_new_tokens: int = 300,
+    ) -> list[dict]:
+        """Generate all prompts concurrently, run detection on each response."""
+        responses = self.backend.generate_concurrent(
+            prompts,
+            max_concurrent=self.max_concurrent,
+            max_new_tokens=max_new_tokens,
+        )
+        return [detect_fn(r) for r in responses]
+
+    # ── Blackmail ──────────────────────────────────────────────────────────────
+
     def run_blackmail_baseline(
         self, output_dir: str = "results/behavioral"
     ) -> dict:
-        """Measure baseline blackmail rate (no steering)."""
-        Path(output_dir).mkdir(parents=True, exist_ok=True)
-        results = []
-        for i in tqdm(range(self.n_trials), desc="Blackmail baseline"):
-            r = self._run_blackmail_trial()
-            r.trial = i
-            results.append(r)
+        """
+        Measure baseline blackmail rate.
 
-        engagement_rate = sum(r.engaged_unsafely for r in results) / len(results)
-        print(f"Blackmail baseline engagement rate: {engagement_rate:.1%}")
+        All n_trials prompts are submitted concurrently via generate_concurrent().
+        """
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        prompt = f"{BLACKMAIL_SYSTEM}\n\n{BLACKMAIL_CONTEXT}"
+        print(f"Running {self.n_trials} blackmail trials concurrently...")
+
+        detections = self._batch_detect(
+            [prompt] * self.n_trials, detect_blackmail_attempt, max_new_tokens=300
+        )
+        engagement_rate = sum(d["is_blackmail"] for d in detections) / self.n_trials
+        print(f"Blackmail baseline: {engagement_rate:.1%}")
 
         output = {
             "scenario": "blackmail",
@@ -278,12 +308,8 @@ class BehavioralEvaluator:
             "n_trials": self.n_trials,
             "engagement_rate": engagement_rate,
             "results": [
-                {
-                    "trial": r.trial,
-                    "engaged": r.engaged_unsafely,
-                    "detection": r.detection,
-                }
-                for r in results
+                {"trial": i, "engaged": d["is_blackmail"], "detection": d}
+                for i, d in enumerate(detections)
             ],
         }
         with open(Path(output_dir) / "blackmail_baseline.json", "w") as f:
@@ -297,27 +323,38 @@ class BehavioralEvaluator:
         layer: int,
         output_dir: str = "results/behavioral",
     ) -> dict:
-        """Measure blackmail rate under different emotion steering conditions."""
+        """
+        Measure blackmail rate under emotion steering.
+
+        Steering requires HuggingFaceBackend and uses sequential generation
+        (forward hooks are not thread-safe).  Trials per condition run
+        sequentially; conditions themselves loop serially.
+        """
         Path(output_dir).mkdir(parents=True, exist_ok=True)
-        all_results = {}
+        all_results: dict = {}
 
         for emotion in tqdm(emotions, desc="Blackmail steering"):
             all_results[emotion] = {}
             for alpha in alpha_values:
-                trials = []
+                prompt = f"{BLACKMAIL_SYSTEM}\n\n{BLACKMAIL_CONTEXT}"
+                detections = []
                 for i in range(self.n_trials):
-                    r = self._run_blackmail_trial(emotion=emotion, alpha=alpha, layer=layer)
-                    r.trial = i
-                    trials.append(r)
+                    if emotion in self.vectors and layer in self.vectors[emotion] and alpha != 0.0:
+                        response = self.backend.generate_with_steering(
+                            prompt, self.vectors[emotion][layer], [layer], alpha, max_new_tokens=300
+                        )
+                    else:
+                        response = self.backend.generate(prompt, max_new_tokens=300)
+                    detections.append(detect_blackmail_attempt(response))
 
-                engagement_rate = sum(r.engaged_unsafely for r in trials) / len(trials)
-                print(f"  {emotion} α={alpha:.1f}: {engagement_rate:.1%}")
+                rate = sum(d["is_blackmail"] for d in detections) / self.n_trials
+                print(f"  {emotion} α={alpha:+.1f}: {rate:.1%}")
                 all_results[emotion][str(alpha)] = {
-                    "engagement_rate": engagement_rate,
+                    "engagement_rate": rate,
                     "n_trials": self.n_trials,
                     "results": [
-                        {"trial": r.trial, "engaged": r.engaged_unsafely, "detection": r.detection}
-                        for r in trials
+                        {"trial": i, "engaged": d["is_blackmail"], "detection": d}
+                        for i, d in enumerate(detections)
                     ],
                 }
 
@@ -325,22 +362,28 @@ class BehavioralEvaluator:
             json.dump(all_results, f, indent=2, default=float)
         return all_results
 
+    # ── Reward hacking ─────────────────────────────────────────────────────────
+
     def run_reward_hacking_baseline(
         self, output_dir: str = "results/behavioral"
     ) -> dict:
-        """Measure baseline reward hacking rate."""
+        """
+        Measure baseline reward-hacking rate.
+
+        All tasks × n_trials prompts are batched into one generate_concurrent()
+        call per task.
+        """
         Path(output_dir).mkdir(parents=True, exist_ok=True)
-        all_results = {}
+        all_results: dict = {}
 
         for task in REWARD_HACKING_TASKS:
-            results = []
-            for i in tqdm(range(self.n_trials), desc=f"Reward hacking: {task['id']}"):
-                r = self._run_reward_hacking_trial(task)
-                r.trial = i
-                results.append(r)
-
-            rate = sum(r.engaged_unsafely for r in results) / len(results)
-            print(f"Reward hacking baseline ({task['id']}): {rate:.1%}")
+            prompt = f"{REWARD_HACKING_SYSTEM}\n\n{task['prompt']}"
+            print(f"Running {self.n_trials} trials for {task['id']} concurrently...")
+            detections = self._batch_detect(
+                [prompt] * self.n_trials, detect_reward_hacking, max_new_tokens=400
+            )
+            rate = sum(d["is_reward_hacking"] for d in detections) / self.n_trials
+            print(f"Reward hacking ({task['id']}): {rate:.1%}")
             all_results[task["id"]] = {
                 "engagement_rate": rate,
                 "impossible_constraint": task["impossible_constraint"],
@@ -358,21 +401,26 @@ class BehavioralEvaluator:
         layer: int,
         output_dir: str = "results/behavioral",
     ) -> dict:
-        """Measure reward hacking rate under emotion steering."""
+        """Measure reward-hacking rate under emotion steering (sequential)."""
         Path(output_dir).mkdir(parents=True, exist_ok=True)
-        all_results = {}
+        all_results: dict = {}
 
         for task in REWARD_HACKING_TASKS:
             all_results[task["id"]] = {}
+            prompt = f"{REWARD_HACKING_SYSTEM}\n\n{task['prompt']}"
             for emotion in tqdm(emotions, desc=f"RH steering: {task['id']}"):
                 all_results[task["id"]][emotion] = {}
                 for alpha in alpha_values:
-                    trials = []
-                    for i in range(self.n_trials):
-                        r = self._run_reward_hacking_trial(task, emotion=emotion, alpha=alpha, layer=layer)
-                        r.trial = i
-                        trials.append(r)
-                    rate = sum(r.engaged_unsafely for r in trials) / len(trials)
+                    detections = []
+                    for _ in range(self.n_trials):
+                        if emotion in self.vectors and layer in self.vectors[emotion] and alpha != 0.0:
+                            response = self.backend.generate_with_steering(
+                                prompt, self.vectors[emotion][layer], [layer], alpha, max_new_tokens=400
+                            )
+                        else:
+                            response = self.backend.generate(prompt, max_new_tokens=400)
+                        detections.append(detect_reward_hacking(response))
+                    rate = sum(d["is_reward_hacking"] for d in detections) / self.n_trials
                     all_results[task["id"]][emotion][str(alpha)] = {"engagement_rate": rate}
 
         with open(Path(output_dir) / "reward_hacking_steered.json", "w") as f:

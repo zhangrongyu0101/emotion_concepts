@@ -38,6 +38,13 @@ model:
   # SGLang server mode (run: python -m sglang.launch_server --model-path ... --port 30000)
   sglang_server_url: "http://localhost:30000"
 
+concurrency:
+  # Batch size / max parallel workers for generate_concurrent().
+  # vLLM / SGLang: ignored (they self-tune internally).
+  # HuggingFace: mini-batch size for batched generation.
+  # Ollama / OpenAI-compat: thread-pool size.
+  max_concurrent: 32
+
 emotion_vectors:
   # Number of stories to generate per emotion word
   stories_per_emotion: 10

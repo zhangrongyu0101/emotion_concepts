@@ -1,25 +1,23 @@
 """
-SGLang backend — fast inference with structured generation support.
+SGLang backend — fast inference with RadixAttention prefix caching.
 
-Supports text generation only; activation extraction requires HuggingFaceBackend.
 Install: pip install 'emotion-concepts[sglang]'
 
-Two usage modes:
-  1. In-process runtime (SGLangBackend) — launches SGLang engine in the same process.
-  2. Server mode (SGLangServerBackend) — connects to a running `python -m sglang.launch_server`.
+Two classes:
+  SGLangBackend       — in-process runtime; generate_concurrent() uses
+                        run_batch(num_threads=max_concurrent) for true parallelism.
+  SGLangServerBackend — HTTP client for a running `python -m sglang.launch_server`;
+                        generate_concurrent() sends requests via ThreadPoolExecutor.
 
-Typical use:
-    # In-process
-    backend = SGLangBackend("Qwen/Qwen2.5-7B-Instruct")
-    text = backend.generate("Write a story about joy.")
-
-    # Server mode
-    backend = SGLangServerBackend("http://localhost:30000")
-    text = backend.generate("Write a story about joy.")
+Start server:
+    python -m sglang.launch_server \
+        --model-path Qwen/Qwen2.5-7B-Instruct \
+        --port 30000 --tp 1
 """
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 
 import requests
@@ -27,14 +25,19 @@ import requests
 from .base import BaseBackend
 
 
+# ─── In-process runtime ───────────────────────────────────────────────────────
+
 class SGLangBackend(BaseBackend):
     """
-    In-process SGLang runtime.
+    In-process SGLang runtime with RadixAttention prefix caching.
 
-    SGLang provides RadixAttention for prefix caching — excellent for experiments
-    that share long system prompts (e.g., repeated behavioral evaluation runs).
+    For experiments that share long system prompts across many generations
+    (e.g., behavioral evaluation with the same BLACKMAIL_SYSTEM prompt across
+    all 20 × N trials), SGLang caches the KV for the shared prefix and only
+    computes the unique suffix — giving substantial speed-ups vs. vLLM.
 
-    Not suitable for activation extraction or steering — use HuggingFaceBackend for those.
+    generate_concurrent() maps directly to run_batch(num_threads=max_concurrent),
+    which processes all requests concurrently inside the SGLang scheduler.
     """
 
     def __init__(
@@ -46,29 +49,26 @@ class SGLangBackend(BaseBackend):
         max_total_tokens: Optional[int] = None,
         trust_remote_code: bool = True,
         port: int = 30000,
+        max_concurrent: int = 128,
     ):
         """
         Args:
             model: HuggingFace model ID or local path.
             tp_size: Tensor parallel size (number of GPUs).
-            dtype: Weight dtype — "auto", "float16", "bfloat16".
             mem_fraction_static: Fraction of GPU memory for KV cache.
-            max_total_tokens: Maximum total token budget. None = auto.
-            trust_remote_code: Pass to HuggingFace loader.
-            port: Port for internal SGLang server.
+            max_concurrent: Default for generate_concurrent().
         """
         try:
             import sglang as sgl  # noqa: F401
         except ImportError:
             raise ImportError(
                 "SGLang is not installed. Run: pip install 'emotion-concepts[sglang]'\n"
-                "Note: SGLang requires CUDA. For macOS use HuggingFace or Ollama."
+                "Note: SGLang requires CUDA."
             )
 
         import sglang as sgl
 
         print(f"Launching SGLang runtime: {model} (tp={tp_size})")
-
         runtime_kwargs: dict = dict(
             model_path=model,
             tp_size=tp_size,
@@ -84,10 +84,26 @@ class SGLangBackend(BaseBackend):
         sgl.set_default_backend(self._runtime)
         self._sgl = sgl
         self._model_name = model
+        self._default_max_concurrent = max_concurrent
 
-        # Get tokenizer for chat template application
         from transformers import AutoTokenizer
         self._tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
+
+    def _make_sgl_fn(self, max_new_tokens: int, temperature: float, top_p: float, do_sample: bool):
+        """Return a compiled sgl.function for generation."""
+        sgl = self._sgl
+
+        @sgl.function
+        def _gen(s, prompt_text):
+            s += prompt_text
+            s += sgl.gen(
+                "response",
+                max_new_tokens=max_new_tokens,
+                temperature=temperature if do_sample else 0.0,
+                top_p=top_p if do_sample else 1.0,
+            )
+
+        return _gen
 
     def generate(
         self,
@@ -97,45 +113,33 @@ class SGLangBackend(BaseBackend):
         top_p: float = 0.95,
         do_sample: bool = True,
     ) -> str:
-        sgl = self._sgl
-
-        @sgl.function
-        def _gen(s, prompt_text):
-            s += prompt_text
-            s += sgl.gen(
-                "response",
-                max_new_tokens=max_new_tokens,
-                temperature=temperature if do_sample else 0.0,
-                top_p=top_p if do_sample else 1.0,
-            )
-
-        state = _gen.run(prompt_text=prompt)
+        fn = self._make_sgl_fn(max_new_tokens, temperature, top_p, do_sample)
+        state = fn.run(prompt_text=prompt)
         return state["response"]
 
-    def generate_batch(
+    def generate_concurrent(
         self,
         prompts: list[str],
+        max_concurrent: int | None = None,
         max_new_tokens: int = 300,
         temperature: float = 0.8,
         top_p: float = 0.95,
         do_sample: bool = True,
+        **kwargs,
     ) -> list[str]:
-        """Generate for multiple prompts in parallel — SGLang's main advantage."""
-        sgl = self._sgl
+        """
+        Override: use SGLang's run_batch() for native concurrent execution.
 
-        @sgl.function
-        def _gen(s, prompt_text):
-            s += prompt_text
-            s += sgl.gen(
-                "response",
-                max_new_tokens=max_new_tokens,
-                temperature=temperature if do_sample else 0.0,
-                top_p=top_p if do_sample else 1.0,
-            )
-
-        states = _gen.run_batch(
+        All prompts are scheduled by the SGLang runtime simultaneously;
+        num_threads controls how many Python threads submit requests in parallel.
+        Combined with RadixAttention, shared prefixes (e.g. system prompts) are
+        computed only once.
+        """
+        n_threads = max_concurrent or self._default_max_concurrent
+        fn = self._make_sgl_fn(max_new_tokens, temperature, top_p, do_sample)
+        states = fn.run_batch(
             [{"prompt_text": p} for p in prompts],
-            num_threads=len(prompts),
+            num_threads=min(n_threads, len(prompts)),
             progress_bar=True,
         )
         return [s["response"] for s in states]
@@ -146,28 +150,41 @@ class SGLangBackend(BaseBackend):
         max_new_tokens: int = 300,
         temperature: float = 0.8,
     ) -> str:
-        """Chat-format generation using the model's chat template."""
         prompt = self._tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
         return self.generate(prompt, max_new_tokens=max_new_tokens, temperature=temperature)
 
+    def chat_concurrent(
+        self,
+        batch_messages: list[list[dict]],
+        max_concurrent: int | None = None,
+        **kwargs,
+    ) -> list[str]:
+        """Batch chat-format generation."""
+        prompts = [
+            self._tokenizer.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
+            for msgs in batch_messages
+        ]
+        return self.generate_concurrent(prompts, max_concurrent=max_concurrent, **kwargs)
+
     def shutdown(self):
-        """Shut down the SGLang runtime and release GPU memory."""
         self._runtime.shutdown()
 
+
+# ─── Server HTTP client ───────────────────────────────────────────────────────
 
 class SGLangServerBackend(BaseBackend):
     """
     HTTP client for a running SGLang server.
 
-    Start the server separately:
+    generate_concurrent() sends all requests in parallel via a thread pool,
+    letting the server-side scheduler (with RadixAttention) batch them.
+
+    Start the server:
         python -m sglang.launch_server \\
             --model-path Qwen/Qwen2.5-7B-Instruct \\
             --port 30000 --tp 1
-
-    Then connect:
-        backend = SGLangServerBackend("http://localhost:30000")
     """
 
     def __init__(
@@ -175,9 +192,11 @@ class SGLangServerBackend(BaseBackend):
         base_url: str = "http://localhost:30000",
         model: Optional[str] = None,
         timeout: int = 120,
+        max_concurrent: int = 128,
     ):
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
+        self._default_max_concurrent = max_concurrent
         self._model = model or self._detect_model()
 
     def _detect_model(self) -> str:
@@ -191,14 +210,7 @@ class SGLangServerBackend(BaseBackend):
             pass
         return "unknown"
 
-    def generate(
-        self,
-        prompt: str,
-        max_new_tokens: int = 300,
-        temperature: float = 0.8,
-        top_p: float = 0.95,
-        do_sample: bool = True,
-    ) -> str:
+    def _post_completion(self, prompt: str, max_new_tokens: int, temperature: float, top_p: float, do_sample: bool) -> str:
         payload = {
             "model": self._model,
             "prompt": prompt,
@@ -213,6 +225,47 @@ class SGLangServerBackend(BaseBackend):
         )
         resp.raise_for_status()
         return resp.json()["choices"][0]["text"]
+
+    def generate(
+        self,
+        prompt: str,
+        max_new_tokens: int = 300,
+        temperature: float = 0.8,
+        top_p: float = 0.95,
+        do_sample: bool = True,
+    ) -> str:
+        return self._post_completion(prompt, max_new_tokens, temperature, top_p, do_sample)
+
+    def generate_concurrent(
+        self,
+        prompts: list[str],
+        max_concurrent: int | None = None,
+        max_new_tokens: int = 300,
+        temperature: float = 0.8,
+        top_p: float = 0.95,
+        do_sample: bool = True,
+        **kwargs,
+    ) -> list[str]:
+        """
+        Send all prompts concurrently to the SGLang HTTP server.
+
+        The server's RadixAttention scheduler handles shared-prefix caching
+        across concurrent requests automatically.
+        """
+        n_workers = max_concurrent or self._default_max_concurrent
+        results: list[str | None] = [None] * len(prompts)
+
+        with ThreadPoolExecutor(max_workers=min(n_workers, len(prompts))) as executor:
+            future_to_idx = {
+                executor.submit(
+                    self._post_completion, p, max_new_tokens, temperature, top_p, do_sample
+                ): i
+                for i, p in enumerate(prompts)
+            }
+            for future in as_completed(future_to_idx):
+                results[future_to_idx[future]] = future.result()
+
+        return results  # type: ignore[return-value]
 
     def chat(
         self,
