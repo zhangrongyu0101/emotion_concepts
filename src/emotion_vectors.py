@@ -91,11 +91,12 @@ class StoryGenerator:
     def __init__(
         self,
         backend: BaseBackend,
-        n_stories: int = 10,
-        n_neutral: int = 30,
+        n_stories: int = 20,
+        n_neutral: int = 50,
         story_prompt_template: str = STORY_PROMPT,
         neutral_prompt_template: str = NEUTRAL_PROMPT,
         max_concurrent: int = 64,
+        max_new_tokens: int = 4096,
     ):
         self.backend = backend
         self.n_stories = n_stories
@@ -103,6 +104,7 @@ class StoryGenerator:
         self.story_prompt = story_prompt_template
         self.neutral_prompt = neutral_prompt_template
         self.max_concurrent = max_concurrent
+        self.max_new_tokens = max_new_tokens
 
     def _save_records(self, records: list[dict], stories_dir: Path) -> None:
         by_label: dict[str, list[dict]] = {}
@@ -145,7 +147,7 @@ class StoryGenerator:
             prompts = [self.neutral_prompt] * remaining_neutral
             stories = self.backend.generate_concurrent(
                 prompts, max_concurrent=self.max_concurrent,
-                max_new_tokens=300, temperature=0.8,
+                max_new_tokens=self.max_new_tokens, temperature=0.8,
             )
             records = [
                 {
@@ -179,7 +181,7 @@ class StoryGenerator:
             stories = self.backend.generate_concurrent(
                 [prompt] * remaining,
                 max_concurrent=self.max_concurrent,
-                max_new_tokens=300,
+                max_new_tokens=self.max_new_tokens,
                 temperature=0.8,
             )
             records = [
@@ -220,14 +222,15 @@ class EmotionVectorExtractor:
     def __init__(
         self,
         backend: HuggingFaceBackend,
-        n_stories: int = 10,
-        n_neutral: int = 30,
+        n_stories: int = 20,
+        n_neutral: int = 50,
         aggregation: str = "mean",
         target_layers: Optional[list[int]] = None,
         story_prompt_template: str = STORY_PROMPT,
         neutral_prompt_template: str = NEUTRAL_PROMPT,
         stories_dir: Optional[str] = None,
         max_concurrent: int = 32,
+        max_new_tokens: int = 4096,
     ):
         """
         Args:
@@ -240,6 +243,7 @@ class EmotionVectorExtractor:
             max_concurrent: Batch size passed to generate_concurrent().
                             For HF: mini-batch size.
                             For vLLM/SGLang: ignored (they handle it internally).
+            max_new_tokens: Maximum tokens for story generation.
         """
         self.backend = backend
         self.n_stories = n_stories
@@ -248,6 +252,7 @@ class EmotionVectorExtractor:
         self.story_prompt = story_prompt_template
         self.neutral_prompt = neutral_prompt_template
         self.max_concurrent = max_concurrent
+        self.max_new_tokens = max_new_tokens
         self.stories_dir = Path(stories_dir) if stories_dir else None
         if self.stories_dir:
             self.stories_dir.mkdir(parents=True, exist_ok=True)
@@ -288,7 +293,7 @@ class EmotionVectorExtractor:
         stories = self.backend.generate_concurrent(
             prompts,
             max_concurrent=self.max_concurrent,
-            max_new_tokens=300,
+            max_new_tokens=self.max_new_tokens,
             temperature=0.8,
             top_p=0.95,
         )

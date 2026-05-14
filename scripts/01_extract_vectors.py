@@ -62,11 +62,12 @@ def main():
     model_name = args.model or cfg["model"]["hf_model_name"]
     device = args.device or cfg["model"]["device"]
     dtype = args.dtype or cfg["model"]["dtype"]
-    n_stories = args.n_stories or cfg["emotion_vectors"]["stories_per_emotion"]
-    n_neutral = args.n_neutral or cfg["emotion_vectors"]["neutral_stories"]
-    output_dir = args.output_dir or cfg["emotion_vectors"]["output_dir"]
-    aggregation = cfg["emotion_vectors"]["aggregation"]
-    target_layers = cfg["emotion_vectors"]["target_layers"]
+    n_stories      = args.n_stories or cfg["emotion_vectors"]["stories_per_emotion"]
+    n_neutral      = args.n_neutral or cfg["emotion_vectors"]["neutral_stories"]
+    output_dir     = args.output_dir or cfg["emotion_vectors"]["output_dir"]
+    aggregation    = cfg["emotion_vectors"]["aggregation"]
+    target_layers  = cfg["emotion_vectors"]["target_layers"]
+    max_new_tokens = cfg["generation"]["max_new_tokens"]
 
     if args.no_save_stories:
         stories_dir = None
@@ -106,6 +107,7 @@ def main():
         neutral_prompt_template=cfg["generation"]["neutral_prompt_template"],
         stories_dir=stories_dir,
         max_concurrent=max_concurrent,
+        max_new_tokens=max_new_tokens,
     )
 
     vectors = extractor.extract_all(

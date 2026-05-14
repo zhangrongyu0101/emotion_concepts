@@ -66,10 +66,11 @@ def main():
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
 
-    n_stories     = args.n_stories     or cfg["emotion_vectors"]["stories_per_emotion"]
-    n_neutral     = args.n_neutral     or cfg["emotion_vectors"]["neutral_stories"]
-    stories_dir   = args.stories_dir   or cfg["emotion_vectors"]["stories_dir"] or "results/stories"
+    n_stories      = args.n_stories      or cfg["emotion_vectors"]["stories_per_emotion"]
+    n_neutral      = args.n_neutral      or cfg["emotion_vectors"]["neutral_stories"]
+    stories_dir    = args.stories_dir    or cfg["emotion_vectors"]["stories_dir"] or "results/stories"
     max_concurrent = args.max_concurrent or cfg.get("concurrency", {}).get("max_concurrent", 64)
+    max_new_tokens = cfg["generation"]["max_new_tokens"]
 
     # ── Build backend ─────────────────────────────────────────────────────────
     if args.backend == "vllm":
@@ -130,6 +131,7 @@ def main():
         story_prompt_template=cfg["generation"]["story_prompt_template"],
         neutral_prompt_template=cfg["generation"]["neutral_prompt_template"],
         max_concurrent=max_concurrent,
+        max_new_tokens=max_new_tokens,
     )
 
     generator.generate_all(

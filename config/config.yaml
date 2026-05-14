@@ -47,10 +47,14 @@ concurrency:
 
 emotion_vectors:
   # Number of stories to generate per emotion word
-  stories_per_emotion: 10
+  stories_per_emotion: 20
   # Number of neutral/control stories
-  neutral_stories: 30
-  # Layers to extract activations from (null = all layers)
+  neutral_stories: 50
+  # Layers to extract activations from.
+  # null = all layers (safest default; lets you pick any layer at analysis time).
+  # To focus on higher layers and save memory, use an explicit list, e.g.:
+  #   target_layers: [14, 16, 18, 20, 22, 24, 26]   # upper half of Qwen2.5-7B
+  #   target_layers: [20, 22, 24, 26]                # top quarter only
   target_layers: null
   # Token aggregation strategy: "last", "mean", "max"
   aggregation: "mean"
@@ -61,7 +65,8 @@ emotion_vectors:
   stories_dir: "results/stories"
 
 generation:
-  max_new_tokens: 300
+  # Max tokens per story — set high enough for complete, detailed stories
+  max_new_tokens: 4096
   temperature: 0.8
   top_p: 0.95
   do_sample: true
@@ -93,8 +98,8 @@ behavioral_eval:
   output_dir: "results/behavioral"
 
 steering:
-  # Layers to apply emotion steering
-  steering_layers: [10, 15, 20]
+  # Layers to apply emotion steering — include higher layers for richer semantics
+  steering_layers: [10, 14, 18, 20, 22, 24, 26]
   # Alpha values for steering strength
   alpha_values: [-3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0]
   output_dir: "results/steering"
