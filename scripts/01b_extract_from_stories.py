@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import yaml
 
 from src.emotion_vectors import EmotionVectorExtractor
-from src.models.hf_backend import HuggingFaceBackend
+from src.models import get_backend
 
 
 def parse_args():
@@ -80,9 +80,15 @@ def main():
     n_emotions = sum(1 for f in jsonl_files if f.stem != "neutral")
     print(f"Found {len(jsonl_files)} JSONL files ({n_emotions} emotions + neutral) in {stories_dir}/")
 
-    print(f"\nLoading HuggingFace model: {model_name} on {device} ({dtype})")
-    backend = HuggingFaceBackend(
+    gpu_ids = cfg["model"].get("hf_gpu_ids")
+    if gpu_ids:
+        print(f"\nMulti-GPU pool: {len(gpu_ids)} replica(s) of {model_name} on GPUs {gpu_ids}")
+    else:
+        print(f"\nLoading {model_name} on {device} ({dtype})")
+    backend = get_backend(
+        "hf",
         model_name=model_name,
+        gpu_ids=gpu_ids,
         device=device,
         dtype=dtype,
     )

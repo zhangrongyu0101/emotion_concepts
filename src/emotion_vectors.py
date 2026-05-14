@@ -309,26 +309,40 @@ class EmotionVectorExtractor:
         ])
         return stories
 
-    # ── Phase 2: sequential activation extraction ─────────────────────────────
+    # ── Phase 2: activation extraction (parallel if pool, sequential if single GPU) ──
+
+    def _extract_activations_texts(
+        self, texts: list[str]
+    ) -> dict[int, list[torch.Tensor]]:
+        """
+        Extract activations for a flat list of full texts.
+
+        Uses get_activations_many() when the backend is a model pool (parallel
+        across GPUs); falls back to sequential extraction on a single GPU.
+        """
+        if hasattr(self.backend, "get_activations_many"):
+            all_acts = self.backend.get_activations_many(
+                texts, layers=self.target_layers, aggregation=self.aggregation
+            )
+        else:
+            all_acts = [
+                self.backend.get_activations(
+                    t, layers=self.target_layers, aggregation=self.aggregation
+                )
+                for t in texts
+            ]
+
+        layer_acts: dict[int, list[torch.Tensor]] = {l: [] for l in self.target_layers}
+        for acts in all_acts:
+            for layer, act in acts.items():
+                layer_acts[layer].append(act)
+        return layer_acts
 
     def _extract_activations(
         self, prompt: str, stories: list[str]
     ) -> dict[int, list[torch.Tensor]]:
-        """
-        Extract residual-stream activations for each story (sequential).
-
-        Returns dict mapping layer -> list of activation tensors.
-        """
-        layer_acts: dict[int, list[torch.Tensor]] = {l: [] for l in self.target_layers}
-        for story in stories:
-            acts = self.backend.get_activations(
-                prompt + story,
-                layers=self.target_layers,
-                aggregation=self.aggregation,
-            )
-            for layer, act in acts.items():
-                layer_acts[layer].append(act)
-        return layer_acts
+        """Extract activations for a set of stories given their shared prompt prefix."""
+        return self._extract_activations_texts([prompt + s for s in stories])
 
     # ── Neutral baseline ───────────────────────────────────────────────────────
 
@@ -460,15 +474,8 @@ class EmotionVectorExtractor:
             if not neutral_records:
                 raise ValueError("No neutral.jsonl found in stories_dir")
             print(f"Extracting {len(neutral_records)} neutral activations...")
-            neutral_acts: dict[int, list[torch.Tensor]] = {l: [] for l in self.target_layers}
-            for rec in tqdm(neutral_records, desc="Neutral activations"):
-                acts = self.backend.get_activations(
-                    rec["prompt"] + rec["story"],
-                    layers=self.target_layers,
-                    aggregation=self.aggregation,
-                )
-                for layer, act in acts.items():
-                    neutral_acts[layer].append(act)
+            neutral_texts = [r["prompt"] + r["story"] for r in neutral_records]
+            neutral_acts = self._extract_activations_texts(neutral_texts)
             torch.save(neutral_acts, neutral_cache)
 
         # ── Per-emotion vectors ───────────────────────────────────────────────
@@ -484,15 +491,8 @@ class EmotionVectorExtractor:
                 continue
 
             records = all_stories[label]
-            emotion_acts: dict[int, list[torch.Tensor]] = {l: [] for l in self.target_layers}
-            for rec in records:
-                acts = self.backend.get_activations(
-                    rec["prompt"] + rec["story"],
-                    layers=self.target_layers,
-                    aggregation=self.aggregation,
-                )
-                for layer, act in acts.items():
-                    emotion_acts[layer].append(act)
+            emotion_texts = [r["prompt"] + r["story"] for r in records]
+            emotion_acts = self._extract_activations_texts(emotion_texts)
 
             vectors: dict[int, torch.Tensor] = {}
             for layer in self.target_layers:

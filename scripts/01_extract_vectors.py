@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import yaml
 
 from src.emotion_vectors import EmotionVectorExtractor, load_emotion_words
-from src.models.hf_backend import HuggingFaceBackend
+from src.models import get_backend
 
 
 def parse_args():
@@ -86,8 +86,15 @@ def main():
         emotion_words = [e for e in emotion_words if e in args.emotions]
         print(f"Processing {len(emotion_words)} emotions: {emotion_words}")
 
-    backend = HuggingFaceBackend(
+    gpu_ids = cfg["model"].get("hf_gpu_ids")
+    if gpu_ids:
+        print(f"Multi-GPU pool: {len(gpu_ids)} replica(s) on GPUs {gpu_ids}")
+    else:
+        print(f"Single GPU: {device}")
+    backend = get_backend(
+        "hf",
         model_name=model_name,
+        gpu_ids=gpu_ids,
         device=device,
         dtype=dtype,
     )

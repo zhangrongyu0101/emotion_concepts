@@ -40,6 +40,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import yaml
 
 from src.emotion_vectors import load_emotion_vectors
+from src.models import get_backend
 from src.models.hf_backend import HuggingFaceBackend
 
 
@@ -172,7 +173,7 @@ def load_or_download_aime(
 # ── Inference ──────────────────────────────────────────────────────────────────
 
 def run_condition(
-    backend: HuggingFaceBackend,
+    backend,  # HuggingFaceBackend or HuggingFaceModelPool
     problems: list[dict],
     prompts: list[str],
     *,
@@ -320,9 +321,15 @@ def main():
     device     = args.device or cfg["model"]["device"]
     dtype      = args.dtype  or cfg["model"]["dtype"]
 
-    print(f"\nLoading {model_name} on {device} ({dtype}) ...")
-    backend = HuggingFaceBackend(
+    gpu_ids = cfg["model"].get("hf_gpu_ids")
+    if gpu_ids:
+        print(f"\nMulti-GPU pool: {len(gpu_ids)} replica(s) of {model_name} on GPUs {gpu_ids}")
+    else:
+        print(f"\nLoading {model_name} on {device} ({dtype}) ...")
+    backend = get_backend(
+        "hf",
         model_name=model_name,
+        gpu_ids=gpu_ids,
         device=device,
         dtype=dtype,
     )

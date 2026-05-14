@@ -7,10 +7,17 @@ model:
   # HuggingFace model for activation extraction (requires HF backend + GPU)
   # Qwen3-32B has no separate instruct variant — the base model is instruction-tuned
   hf_model_name: "Qwen/Qwen3-32B"
-  # Device: "cuda" for GPU (required for 32B); "cpu" for dev/testing only
-  device: "cuda"
+  # Device used when running on a single GPU (ignored when hf_gpu_ids is set)
+  device: "cuda:0"
   # bfloat16 is the official dtype for Qwen3 on Ampere/Hopper GPUs
   dtype: "bfloat16"
+
+  # Multi-GPU model pool: one complete model replica per listed GPU.
+  # Qwen3-32B at bfloat16 uses ~65 GB; each H200 (141 GB) holds one copy
+  # with plenty of headroom for activations.
+  # Set to null to use a single GPU (device above).
+  # Set to a list of GPU IDs to enable the pool, e.g. [0,1,2,3,4,5,6,7]
+  hf_gpu_ids: [0, 1, 2, 3, 4, 5, 6, 7]
 
   # Ollama backend (fast local inference, no activation access)
   ollama_host: "http://localhost:11434"
