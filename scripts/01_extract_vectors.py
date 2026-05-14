@@ -90,8 +90,6 @@ def main():
         model_name=model_name,
         device=device,
         dtype=dtype,
-        load_in_4bit=cfg["model"]["load_in_4bit"],
-        load_in_8bit=cfg["model"]["load_in_8bit"],
     )
 
     max_concurrent = args.max_concurrent or cfg.get("concurrency", {}).get("max_concurrent", 32)

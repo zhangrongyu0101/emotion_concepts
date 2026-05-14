@@ -85,8 +85,6 @@ def main():
         model_name=model_name,
         device=device,
         dtype=dtype,
-        load_in_4bit=cfg["model"]["load_in_4bit"],
-        load_in_8bit=cfg["model"]["load_in_8bit"],
     )
 
     extractor = EmotionVectorExtractor(

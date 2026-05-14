@@ -1,51 +1,43 @@
 # Emotion Concepts Replication Configuration
-# Default model: Qwen/Qwen3-32B
+# Default model: Qwen/Qwen3-32B  (bfloat16, no quantization)
 #   Architecture: 64 layers, hidden_size=5120, GQA (64 heads / 8 kv-heads)
-#   VRAM: ~65 GB in bfloat16; ~18 GB with AWQ-int4 (Qwen/Qwen3-32B-AWQ)
-#   Quantized options: Qwen/Qwen3-32B-AWQ (official), Qwen/Qwen3-32B-FP8 (official)
+#   VRAM: ~65 GB in bfloat16 → 2× A100-80G or H100-80G recommended
 
 model:
   # HuggingFace model for activation extraction (requires HF backend + GPU)
   # Qwen3-32B has no separate instruct variant — the base model is instruction-tuned
   hf_model_name: "Qwen/Qwen3-32B"
-  # Device: "cuda" recommended; "mps" for Apple Silicon (slow for 32B), "cpu" only for dev
+  # Device: "cuda" for GPU (required for 32B); "cpu" for dev/testing only
   device: "cuda"
-  # dtype: bfloat16 is the official recommendation for Qwen3 on Ampere/Hopper GPUs
-  # Use float16 only on older hardware (e.g. T4) that lacks native BF16 support
+  # bfloat16 is the official dtype for Qwen3 on Ampere/Hopper GPUs
   dtype: "bfloat16"
-  # Quantization via bitsandbytes — use AWQ/FP8 through vLLM instead for better throughput
-  load_in_4bit: false
-  load_in_8bit: false
 
   # Ollama backend (fast local inference, no activation access)
   ollama_host: "http://localhost:11434"
   ollama_model: "qwen3:32b"
 
-  # OpenAI-compatible API (vLLM server, SGLang server, LM Studio, etc.)
+  # OpenAI-compatible API (vLLM server, SGLang server, etc.)
   openai_base_url: "http://localhost:8000/v1"
   openai_model: "Qwen/Qwen3-32B"
   openai_api_key: "not-needed"
 
-  # vLLM in-process backend
-  # Full precision (bfloat16): needs ~65 GB VRAM → 2× A100-80G or 4× A40/RTX6000
-  # AWQ-int4: needs ~18 GB → 1× A100-40G or 2× RTX4090
-  # vllm_quantization: "awq" pairs with model "Qwen/Qwen3-32B-AWQ"
+  # vLLM in-process backend (~65 GB bfloat16 → set tp to match your GPU count)
+  # Launch example: vllm serve Qwen/Qwen3-32B --tensor-parallel-size 2 --dtype bfloat16
   vllm_model: "Qwen/Qwen3-32B"
-  vllm_tensor_parallel_size: 2          # increase for more GPUs (4 for 4× GPU)
+  vllm_tensor_parallel_size: 2
   vllm_gpu_memory_utilization: 0.92
   vllm_dtype: "bfloat16"
-  vllm_quantization: null               # set "awq" when using Qwen/Qwen3-32B-AWQ
 
   # SGLang in-process backend
+  # Launch example: python -m sglang.launch_server --model-path Qwen/Qwen3-32B \
+  #                   --tp 2 --dtype bfloat16 --port 30000
   sglang_model: "Qwen/Qwen3-32B"
   sglang_tp_size: 2
   sglang_mem_fraction_static: 0.90
   sglang_dtype: "bfloat16"
   sglang_port: 30000
 
-  # SGLang server mode
-  # Launch: python -m sglang.launch_server --model-path Qwen/Qwen3-32B \
-  #           --tp 2 --port 30000 --reasoning-parser qwen3
+  # SGLang server mode (point to a running SGLang server)
   sglang_server_url: "http://localhost:30000"
 
 concurrency:
