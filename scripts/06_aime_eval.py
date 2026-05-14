@@ -60,15 +60,26 @@ Problem:
 {problem}"""
 
 
-def build_prompt(tokenizer, problem: str) -> str:
-    """Apply the model's chat template to produce the correct input string."""
+def build_prompt(tokenizer, problem: str, enable_thinking: bool = True) -> str:
+    """Apply the model's chat template to produce the correct input string.
+
+    enable_thinking=True activates Qwen3's <think>...</think> reasoning blocks,
+    which substantially improves accuracy on hard math problems.
+    """
     messages = [
         {"role": "system", "content": _SYSTEM},
         {"role": "user",   "content": _USER_TEMPLATE.format(problem=problem)},
     ]
-    return tokenizer.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
-    )
+    try:
+        return tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True,
+            enable_thinking=enable_thinking,
+        )
+    except TypeError:
+        # Older tokenizers that don't support enable_thinking
+        return tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True,
+        )
 
 
 # ── Answer extraction ──────────────────────────────────────────────────────────
@@ -278,7 +289,10 @@ def parse_args():
                    help="Steering strengths to sweep")
     p.add_argument("--layer",          type=int, default=None,
                    help="Steering layer index (default: 2/3 through network)")
-    p.add_argument("--max-new-tokens", type=int, default=1024)
+    p.add_argument("--max-new-tokens", type=int, default=8192,
+                   help="Max tokens to generate (higher for thinking mode)")
+    p.add_argument("--no-thinking",    action="store_true",
+                   help="Disable Qwen3 thinking mode (faster but lower accuracy)")
     p.add_argument("--baseline-only",  action="store_true",
                    help="Skip steering, run baseline only")
     p.add_argument("--no-resume",      action="store_true",
@@ -316,7 +330,12 @@ def main():
     )
 
     # ── Format prompts with chat template ─────────────────────────────────────
-    prompts = [build_prompt(backend.tokenizer, p["problem"]) for p in problems]
+    enable_thinking = not args.no_thinking
+    if enable_thinking:
+        print("Thinking mode: ON  (Qwen3 <think>...</think> reasoning enabled)")
+    else:
+        print("Thinking mode: OFF (faster, lower accuracy on hard problems)")
+    prompts = [build_prompt(backend.tokenizer, p["problem"], enable_thinking) for p in problems]
 
     # ── Choose steering layer ─────────────────────────────────────────────────
     layer = args.layer if args.layer is not None else backend.num_layers * 2 // 3

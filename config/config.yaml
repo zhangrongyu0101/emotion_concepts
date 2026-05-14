@@ -1,47 +1,57 @@
 # Emotion Concepts Replication Configuration
+# Default model: Qwen/Qwen3-32B
+#   Architecture: 64 layers, hidden_size=5120, GQA (64 heads / 8 kv-heads)
+#   VRAM: ~65 GB in bfloat16; ~18 GB with AWQ-int4 (Qwen/Qwen3-32B-AWQ)
+#   Quantized options: Qwen/Qwen3-32B-AWQ (official), Qwen/Qwen3-32B-FP8 (official)
 
 model:
-  # HuggingFace model for activation extraction (requires GPU for large models)
-  hf_model_name: "Qwen/Qwen2.5-7B-Instruct"
-  # Device: "cuda", "mps" (Apple Silicon), or "cpu"
-  device: "mps"
-  # dtype: "float16", "bfloat16", or "float32"
-  dtype: "float32"
-  # Load in 4-bit for memory efficiency (requires bitsandbytes)
+  # HuggingFace model for activation extraction (requires HF backend + GPU)
+  # Qwen3-32B has no separate instruct variant — the base model is instruction-tuned
+  hf_model_name: "Qwen/Qwen3-32B"
+  # Device: "cuda" recommended; "mps" for Apple Silicon (slow for 32B), "cpu" only for dev
+  device: "cuda"
+  # dtype: bfloat16 is the official recommendation for Qwen3 on Ampere/Hopper GPUs
+  # Use float16 only on older hardware (e.g. T4) that lacks native BF16 support
+  dtype: "bfloat16"
+  # Quantization via bitsandbytes — use AWQ/FP8 through vLLM instead for better throughput
   load_in_4bit: false
-  # Load in 8-bit for memory efficiency (requires bitsandbytes)
   load_in_8bit: false
 
-  # Ollama backend (for behavioral evaluation without activation access)
+  # Ollama backend (fast local inference, no activation access)
   ollama_host: "http://localhost:11434"
-  ollama_model: "qwen2.5:7b"
+  ollama_model: "qwen3:32b"
 
-  # OpenAI-compatible API backend (works with vLLM server, LM Studio, etc.)
+  # OpenAI-compatible API (vLLM server, SGLang server, LM Studio, etc.)
   openai_base_url: "http://localhost:8000/v1"
-  openai_model: "qwen2.5-7b-instruct"
+  openai_model: "Qwen/Qwen3-32B"
   openai_api_key: "not-needed"
 
-  # vLLM in-process backend (install: pip install 'emotion-concepts[vllm]')
-  vllm_model: "Qwen/Qwen2.5-7B-Instruct"
-  vllm_tensor_parallel_size: 1
-  vllm_gpu_memory_utilization: 0.90
-  vllm_dtype: "auto"
-  vllm_quantization: null  # "awq", "gptq", or null
+  # vLLM in-process backend
+  # Full precision (bfloat16): needs ~65 GB VRAM → 2× A100-80G or 4× A40/RTX6000
+  # AWQ-int4: needs ~18 GB → 1× A100-40G or 2× RTX4090
+  # vllm_quantization: "awq" pairs with model "Qwen/Qwen3-32B-AWQ"
+  vllm_model: "Qwen/Qwen3-32B"
+  vllm_tensor_parallel_size: 2          # increase for more GPUs (4 for 4× GPU)
+  vllm_gpu_memory_utilization: 0.92
+  vllm_dtype: "bfloat16"
+  vllm_quantization: null               # set "awq" when using Qwen/Qwen3-32B-AWQ
 
-  # SGLang in-process backend (install: pip install 'emotion-concepts[sglang]')
-  sglang_model: "Qwen/Qwen2.5-7B-Instruct"
-  sglang_tp_size: 1
-  sglang_mem_fraction_static: 0.88
-  sglang_dtype: "auto"
+  # SGLang in-process backend
+  sglang_model: "Qwen/Qwen3-32B"
+  sglang_tp_size: 2
+  sglang_mem_fraction_static: 0.90
+  sglang_dtype: "bfloat16"
   sglang_port: 30000
 
-  # SGLang server mode (run: python -m sglang.launch_server --model-path ... --port 30000)
+  # SGLang server mode
+  # Launch: python -m sglang.launch_server --model-path Qwen/Qwen3-32B \
+  #           --tp 2 --port 30000 --reasoning-parser qwen3
   sglang_server_url: "http://localhost:30000"
 
 concurrency:
   # Batch size / max parallel workers for generate_concurrent().
   # vLLM / SGLang: ignored (they self-tune internally).
-  # HuggingFace: mini-batch size for batched generation.
+  # HuggingFace: mini-batch size for batched generation (keep low for 32B, e.g. 4-8).
   # Ollama / OpenAI-compat: thread-pool size.
   max_concurrent: 32
 
@@ -51,55 +61,54 @@ emotion_vectors:
   # Number of neutral/control stories
   neutral_stories: 50
   # Layers to extract activations from.
-  # null = all layers (safest default; lets you pick any layer at analysis time).
-  # To focus on higher layers and save memory, use an explicit list, e.g.:
-  #   target_layers: [14, 16, 18, 20, 22, 24, 26]   # upper half of Qwen2.5-7B
-  #   target_layers: [20, 22, 24, 26]                # top quarter only
+  # null = all 64 layers (safest default; gives maximum flexibility at analysis time).
+  # To target higher layers only (saves memory & extraction time), use an explicit list:
+  #   target_layers: [32, 36, 40, 44, 48, 52, 56, 60, 63]  # upper half of Qwen3-32B
+  #   target_layers: [48, 52, 56, 60, 63]                   # top quarter only
   target_layers: null
-  # Token aggregation strategy: "last", "mean", "max"
+  # Token aggregation strategy: "last", "mean"
   aggregation: "mean"
   # Where to save extracted vectors
   output_dir: "results/emotion_vectors"
   # Where to save generated stories as JSONL (null = do not save)
-  # Each emotion gets its own file: results/stories/happy.jsonl, etc.
   stories_dir: "results/stories"
 
 generation:
-  # Max tokens per story — set high enough for complete, detailed stories
+  # Max tokens per story — 4096 ensures complete stories for a 32B model
   max_new_tokens: 4096
-  temperature: 0.8
-  top_p: 0.95
+  temperature: 0.7      # Qwen3 recommended: 0.7 for non-thinking, 0.6 for thinking
+  top_p: 0.8            # Qwen3 recommended: 0.8 (non-thinking) / 0.95 (thinking)
+  top_k: 20             # Qwen3 recommended: 20
   do_sample: true
-  # Story generation prompt template
+  # Qwen3-32B supports a thinking mode (<think>...</think> blocks before the answer).
+  # Disable for story generation (faster, no reasoning overhead needed).
+  # Enable for math/reasoning tasks like AIME evaluation.
+  enable_thinking: false
+  # Story generation prompt templates
   story_prompt_template: "Write a short story (2-3 paragraphs) about a character who is feeling {emotion}. Focus on how this emotion affects their thoughts, actions, and interactions."
   neutral_prompt_template: "Write a short story (2-3 paragraphs) about a character going about their ordinary daily routine. Keep the tone neutral and matter-of-fact."
 
 validation:
-  # Corpus documents for validation testing
   test_corpus_size: 100
-  # Sensitivity test: vary numerical quantities in prompts
   sensitivity_test: true
   output_dir: "results/validation"
 
 preference_analysis:
-  # Number of emotion steering levels to test
   alpha_values: [-2.0, -1.0, 0.0, 1.0, 2.0]
-  # Layer to apply steering for preference tests
-  steering_layer: -1  # -1 = last third of network
+  steering_layer: -1    # -1 = last third of network (~layer 43 for Qwen3-32B)
   output_dir: "results/preference"
 
 behavioral_eval:
-  # Number of trials per scenario
   num_trials: 20
-  # Scenarios to evaluate
   scenarios:
     - "blackmail"
     - "reward_hacking"
   output_dir: "results/behavioral"
 
 steering:
-  # Layers to apply emotion steering — include higher layers for richer semantics
-  steering_layers: [10, 14, 18, 20, 22, 24, 26]
-  # Alpha values for steering strength
+  # Layers to apply emotion steering.
+  # Qwen3-32B has 64 layers (indices 0-63).
+  # Research consistently shows the upper half (~layer 40+) carries richer semantics.
+  steering_layers: [32, 38, 42, 46, 50, 54, 58, 62]
   alpha_values: [-3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0]
   output_dir: "results/steering"
